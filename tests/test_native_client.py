@@ -374,3 +374,32 @@ async def test_http_errors_expose_only_allowlisted_native_codes(serve, code):
     assert error.value.code == (code if code != "PRIVATE CHAT" else "request_failed")
     assert "fake-token" not in str(error.value)
     assert "PRIVATE CHAT" not in str(error.value)
+
+
+@pytest.mark.parametrize("code", ["operation_failed", "auth_required", "PRIVATE CHAT"])
+async def test_refresh_failure_reports_safe_operation_diagnostics(serve, code):
+    operation_id = "3174b191-1933-4eee-9872-123456789012"
+
+    async def handler(req):
+        if req.method == "GET":
+            return web.json_response(member_lookup("bot", "unconfirmed"))
+        return web.json_response(
+            {
+                "id": operation_id,
+                "accountId": "account/a",
+                "kind": "metadata",
+                "state": "failed",
+                "result": {"code": code, "details": "fake-token PRIVATE CHAT"},
+            }
+        )
+
+    api = module("native_client")
+    async with client(await serve(handler)) as c:
+        with pytest.raises(ValueError) as error:
+            await c.prepare_group_mentions("room@chatroom", ["bot"])
+    assert isinstance(error.value, api.GroupMembersUnavailable)
+    assert error.value.state == "failed"
+    assert error.value.code == (code if code != "PRIVATE CHAT" else "operation_failed")
+    assert operation_id in str(error.value)
+    assert "fake-token" not in str(error.value)
+    assert "PRIVATE CHAT" not in str(error.value)

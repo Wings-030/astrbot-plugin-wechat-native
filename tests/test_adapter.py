@@ -174,9 +174,22 @@ async def test_group_mentions_isolation_and_reply_target(serve, tmp_path):
         await adapter.terminate()
 
 
-@pytest.mark.parametrize("outcome", ["accepted", "recalled", "failed"])
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "accepted",
+        "recalled",
+        "failed",
+        "failed_recalled",
+        "explicit_failed",
+        "quote_failed",
+        "auth_failed",
+        "identity_failed",
+    ],
+)
 async def test_new_group_refreshes_before_single_send_and_rechecks_recall(serve, tmp_path, outcome):
     from astrbot.api.event import MessageChain
+    from astrbot.api.message_components import At, Plain, Reply
 
     requests = []
     refreshed = False
@@ -193,18 +206,27 @@ async def test_new_group_refreshes_before_single_send_and_rechecks_recall(serve,
                 )
             if "/operations/" in req.path:
                 refreshed = True
-                if outcome == "recalled":
+                if outcome in {"recalled", "failed_recalled"}:
                     msg["recall"] = {"observedAt": "now"}
                 return web.json_response(
                     {
                         "id": "op1",
                         "accountId": "a",
                         "kind": "metadata",
-                        "state": "failed" if outcome == "failed" else "succeeded",
+                        "state": "succeeded" if outcome in {"accepted", "recalled"} else "failed",
+                        "result": {
+                            "code": {
+                                "auth_failed": "auth_required",
+                                "identity_failed": "account_identity_mismatch",
+                            }.get(outcome, "operation_failed"),
+                            "details": "fake-token PRIVATE CHAT",
+                        },
                     }
                 )
             if ("/members/" in req.path or req.path.endswith("/sends")) and not refreshed:
                 return web.json_response({"error": {"code": "media_not_cached"}}, status=404)
+            if req.path.endswith("/sends") and outcome not in {"accepted", "recalled"}:
+                assert "mentions" not in await req.json()
             return await handler(req)
 
         return await serve(native)
@@ -214,28 +236,37 @@ async def test_new_group_refreshes_before_single_send_and_rechecks_recall(serve,
     try:
         await adapter.process_native_event(native_event(msg))
         event = queue.get_nowait()
-        if outcome == "failed":
+        chain = MessageChain().message("answer")
+        if outcome == "explicit_failed":
+            chain = MessageChain([At(qq="user"), Plain("answer")])
+        elif outcome == "quote_failed":
+            chain = MessageChain([Reply(id="m1"), Plain("answer")])
+        blocked = outcome in {"explicit_failed", "auth_failed", "identity_failed"}
+        delivered = outcome in {"accepted", "failed", "quote_failed"}
+        if blocked:
             with pytest.raises(ValueError, match="群成员"):
-                await event.send(MessageChain().message("answer"))
+                await event.send(chain)
             assert sent == []
             assert adapter.state.message_status("m1") == "failed"
         else:
-            await event.send(MessageChain().message("answer"))
-        if outcome == "recalled":
+            await event.send(chain)
+        if outcome in {"recalled", "failed_recalled"}:
             assert sent == []
             assert event.is_stopped()
             assert adapter.state.message_status("m1") == "recalled"
-        elif outcome == "accepted":
-            assert sent[0][1] == {
+        elif delivered:
+            expected = {
                 "threadId": "room@chatroom",
                 "text": "answer",
-                "mentions": {"userIds": ["user"]},
             }
+            if outcome == "accepted":
+                expected["mentions"] = {"userIds": ["user"]}
+            elif outcome == "quote_failed":
+                expected["quote"] = {"messageId": "m1", "serverId": "900"}
+            assert sent[0][1] == expected
             assert adapter.state.message_status("m1") == "replied"
-        assert requests.count(("POST", "/v1/accounts/a/sends")) == (outcome == "accepted")
-        assert adapter.state.db.execute("SELECT COUNT(*) FROM sends").fetchone()[0] == (
-            outcome == "accepted"
-        )
+        assert requests.count(("POST", "/v1/accounts/a/sends")) == delivered
+        assert adapter.state.db.execute("SELECT COUNT(*) FROM sends").fetchone()[0] == delivered
         assert requests.count(("POST", "/v1/accounts/a/groups/room@chatroom/members/refresh")) == 1
     finally:
         await adapter.terminate()

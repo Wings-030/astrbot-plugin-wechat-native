@@ -20,7 +20,7 @@ from .event import (
     serialize_text,
     session_target,
 )
-from .native_client import NativeAPIError, NativeClient, SendError
+from .native_client import GroupMembersUnavailable, NativeAPIError, NativeClient, SendError
 from .state import StateStore, cursor_number
 from .summary import GroupSummaryCache, is_summary_command
 
@@ -273,6 +273,7 @@ class WeChatNativeAdapter(Platform):
                 if self.client.closed:
                     raise ValueError("Native 客户端未连接，未提交发送")
                 message_id = source["id"] if source else None
+                auto_mention = False
                 if source:
                     source_status = self.state.message_status(message_id)
                     if source_status in {"needs_review", "failed", "partial"}:
@@ -287,10 +288,20 @@ class WeChatNativeAdapter(Platform):
                         and source_status != "replied"
                     ):
                         mentions = {"userIds": [source["senderId"]]}
+                        auto_mention = True
                 if mentions:
-                    await self.client.prepare_group_mentions(
-                        thread, [self.bot_self_id, *mentions.get("userIds", [])]
-                    )
+                    try:
+                        await self.client.prepare_group_mentions(
+                            thread, [self.bot_self_id, *mentions.get("userIds", [])]
+                        )
+                    except GroupMembersUnavailable as error:
+                        if not auto_mention or error.code in {
+                            "auth_required",
+                            "account_identity_mismatch",
+                        }:
+                            raise
+                        logger.warning("WeChat Native 省略自动 @，继续发送回复正文；%s", error)
+                        mentions = None
                 if source:
                     current = await self.client.message(message_id)
                     if (

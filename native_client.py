@@ -4,6 +4,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from urllib.parse import quote
+from uuid import UUID
 
 import aiohttp
 from aiohttp.http_exceptions import LineTooLong
@@ -40,6 +41,32 @@ class SendError(Exception):
     def __init__(self, state: str, key: str, send_id: str | None = None):
         self.state, self.key, self.send_id = state, key, send_id
         super().__init__(f"Native send requires inspection: {state}")
+
+
+class GroupMembersUnavailable(ValueError):
+    """Mention metadata could not be prepared; no send has been submitted."""
+
+    def __init__(self, state: str, code: str = "operation_failed", operation_id: str | None = None):
+        self.state = state
+        self.code = "operation_failed"
+        if isinstance(code, str) and code in {
+            "operation_failed",
+            "auth_required",
+            "account_identity_mismatch",
+            "members_unavailable",
+            "timeout",
+        }:
+            self.code = code
+        self.operation_id = None
+        if operation_id is not None:
+            try:
+                self.operation_id = str(UUID(operation_id))
+            except ValueError:
+                pass
+        super().__init__(
+            f"Native 群成员资料不可用：状态 {self.state}，错误码 {self.code}，"
+            f"操作 {self.operation_id or 'unknown'}"
+        )
 
 
 class NativeClient:
@@ -175,6 +202,7 @@ class NativeClient:
     async def prepare_group_mentions(self, thread: str, user_ids: list[str]) -> None:
         """Refresh missing mention metadata before creating any send intent."""
         user_ids = list(dict.fromkeys(user_ids))
+        operation_id = None
         try:
             async with asyncio.timeout(self.send_timeout):
                 if await self._group_members_present(thread, user_ids):
@@ -194,18 +222,25 @@ class NativeClient:
                         or operation.get("kind") != "metadata"
                     ):
                         raise ValueError("Native 群成员刷新回执身份不匹配，未发送")
-                    if operation.get("state") == "succeeded":
+                    state = operation.get("state")
+                    if state == "succeeded":
                         break
-                    if operation.get("state") not in {"queued", "running"}:
-                        raise ValueError("Native 群成员资料刷新失败，未发送")
+                    if isinstance(state, str) and state in {"failed", "cancelled", "interrupted"}:
+                        result = operation.get("result")
+                        code = (
+                            result.get("code") if isinstance(result, dict) else "operation_failed"
+                        )
+                        raise GroupMembersUnavailable(state, code, operation_id)
+                    if not isinstance(state, str) or state not in {"queued", "running"}:
+                        raise ValueError("Native 群成员刷新状态无效，未发送")
                     await asyncio.sleep(self.poll_interval)
                     operation = await self._request(
                         "GET", self.prefix + "/operations/" + quote(operation_id, safe="")
                     )
                 if not await self._group_members_present(thread, user_ids):
-                    raise ValueError("Native 群成员资料刷新后仍不可用，未发送")
+                    raise GroupMembersUnavailable("succeeded", "members_unavailable", operation_id)
         except TimeoutError:
-            raise ValueError("Native 群成员资料刷新超时，未发送") from None
+            raise GroupMembersUnavailable("timeout", "timeout", operation_id) from None
 
     async def send_text(
         self,
