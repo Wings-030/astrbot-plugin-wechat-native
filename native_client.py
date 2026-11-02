@@ -19,6 +19,11 @@ _SAFE_CODES = {
     "timeout",
     "account_not_found",
     "insufficient_scope",
+    "media_not_cached",
+    "mention_member_unavailable",
+    "mention_group_membership_unavailable",
+    "group_contact_unavailable",
+    "group_state_incomplete",
 }
 
 
@@ -106,6 +111,14 @@ class NativeClient:
                 if not 200 <= response.status < 300:
                     # Never include a server body, URL or underlying exception in logs.
                     code = "event_cursor_expired" if response.status == 410 else "request_failed"
+                    if response.status != 410:
+                        try:
+                            body = await self._read_json(response)
+                            error = body.get("error")
+                            if isinstance(error, dict) and isinstance(error.get("code"), str):
+                                code = error["code"]
+                        except (NativeAPIError, aiohttp.ClientError, TimeoutError, OSError):
+                            pass  # Preserve the HTTP status even when its error body is unusable.
                     raise NativeAPIError(response.status, code)
                 return await self._read_json(response)
         except (aiohttp.ClientError, TimeoutError, OSError):
@@ -130,6 +143,69 @@ class NativeClient:
         return await self._request(
             "GET", self.prefix + "/sends/by-idempotency-key", params={"key": key}
         )
+
+    async def _group_members_present(self, thread: str, user_ids: list[str]) -> bool:
+        for username in user_ids:
+            try:
+                value = await self._request(
+                    "GET",
+                    self.prefix
+                    + "/groups/"
+                    + quote(thread, safe="")
+                    + "/members/"
+                    + quote(username, safe=""),
+                )
+            except NativeAPIError as error:
+                if error.status == 404 and error.code in {"not_found", "media_not_cached"}:
+                    return False
+                raise
+            if value.get("groupId") != thread or value.get("username") != username:
+                raise ValueError("Native 群成员资料身份不匹配，未发送")
+            if value.get("state") == "unconfirmed":
+                return False
+            member = value.get("member")
+            if (
+                value.get("state") != "present"
+                or not isinstance(member, dict)
+                or member.get("username") != username
+            ):
+                raise ValueError("Native 群成员资料无效，未发送")
+        return True
+
+    async def prepare_group_mentions(self, thread: str, user_ids: list[str]) -> None:
+        """Refresh missing mention metadata before creating any send intent."""
+        user_ids = list(dict.fromkeys(user_ids))
+        try:
+            async with asyncio.timeout(self.send_timeout):
+                if await self._group_members_present(thread, user_ids):
+                    return
+                operation = await self._request(
+                    "POST",
+                    self.prefix + "/groups/" + quote(thread, safe="") + "/members/refresh",
+                    json={},
+                )
+                operation_id = operation.get("id")
+                while True:
+                    if (
+                        not isinstance(operation_id, str)
+                        or not operation_id
+                        or operation.get("id") != operation_id
+                        or operation.get("accountId") != self.account_id
+                        or operation.get("kind") != "metadata"
+                    ):
+                        raise ValueError("Native 群成员刷新回执身份不匹配，未发送")
+                    if operation.get("state") == "succeeded":
+                        break
+                    if operation.get("state") not in {"queued", "running"}:
+                        raise ValueError("Native 群成员资料刷新失败，未发送")
+                    await asyncio.sleep(self.poll_interval)
+                    operation = await self._request(
+                        "GET", self.prefix + "/operations/" + quote(operation_id, safe="")
+                    )
+                if not await self._group_members_present(thread, user_ids):
+                    raise ValueError("Native 群成员资料刷新后仍不可用，未发送")
+        except TimeoutError:
+            raise ValueError("Native 群成员资料刷新超时，未发送") from None
 
     async def send_text(
         self,

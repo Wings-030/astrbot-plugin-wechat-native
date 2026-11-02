@@ -280,3 +280,97 @@ async def test_rate_limited_submission_with_missing_lookup_remains_unknown(serve
             await c.send_text("room@chatroom", "hi", "stable-key")
     assert error.value.state == "submission_unknown"
     assert requests == ["POST", "GET"]
+
+
+def member_lookup(username, state="present", **updates):
+    return {
+        "groupId": "room@chatroom",
+        "username": username,
+        "state": state,
+        "member": {"username": username} if state == "present" else None,
+        "coverage": "cached",
+        **updates,
+    }
+
+
+@pytest.mark.parametrize("missing", ["group", "bot", "user", None])
+async def test_prepare_mentions_refreshes_only_missing_group_members(serve, missing):
+    requests = []
+    refreshed = False
+
+    async def handler(req):
+        nonlocal refreshed
+        requests.append((req.method, req.raw_path))
+        if req.path.endswith("/members/refresh"):
+            assert await req.json() == {}
+            return web.json_response(
+                {"id": "op/1", "accountId": "account/a", "kind": "metadata", "state": "queued"},
+                status=202,
+            )
+        if "/operations/" in req.path:
+            refreshed = True
+            return web.json_response(
+                {"id": "op/1", "accountId": "account/a", "kind": "metadata", "state": "succeeded"}
+            )
+        username = req.match_info["path"].rsplit("/", 1)[-1]
+        if missing == "group" and not refreshed:
+            return web.json_response({"error": {"code": "media_not_cached"}}, status=404)
+        state = "unconfirmed" if username == missing and not refreshed else "present"
+        return web.json_response(member_lookup(username, state))
+
+    async with client(await serve(handler), poll_interval=0.001) as c:
+        await c.prepare_group_mentions("room@chatroom", ["bot", "user"])
+    assert sum(method == "POST" for method, _ in requests) == (missing is not None)
+    assert requests[-2:] == [
+        ("GET", "/v1/accounts/account%2Fa/groups/room@chatroom/members/bot"),
+        ("GET", "/v1/accounts/account%2Fa/groups/room@chatroom/members/user"),
+    ]
+    if missing is not None:
+        assert ("GET", "/v1/accounts/account%2Fa/operations/op%2F1") in requests
+
+
+@pytest.mark.parametrize("outcome", ["failed", "timeout", "still_missing", "wrong_operation"])
+async def test_group_member_refresh_must_finish_with_usable_members(serve, outcome):
+    requests = []
+
+    async def handler(req):
+        requests.append((req.method, req.path))
+        if "/members/" in req.path and req.method == "GET":
+            return web.json_response(member_lookup("bot", "unconfirmed"))
+        state = {
+            "failed": "failed",
+            "timeout": "running",
+            "still_missing": "succeeded",
+            "wrong_operation": "succeeded",
+        }[outcome]
+        return web.json_response(
+            {
+                "id": "op1",
+                "accountId": "other" if outcome == "wrong_operation" else "account/a",
+                "kind": "metadata",
+                "state": state,
+            }
+        )
+
+    async with client(await serve(handler), poll_interval=0.001, send_timeout=0.02) as c:
+        with pytest.raises(ValueError, match="群成员"):
+            await asyncio.wait_for(c.prepare_group_mentions("room@chatroom", ["bot"]), 1)
+    assert sum(method == "POST" for method, _ in requests) == 1
+    assert not any("/sends" in path for _, path in requests)
+
+
+@pytest.mark.parametrize("code", ["media_not_cached", "mention_member_unavailable", "PRIVATE CHAT"])
+async def test_http_errors_expose_only_allowlisted_native_codes(serve, code):
+    async def handler(req):
+        return web.json_response(
+            {"error": {"code": code, "message": "fake-token PRIVATE CHAT"}}, status=404
+        )
+
+    api = module("native_client")
+    async with client(await serve(handler)) as c:
+        with pytest.raises(api.NativeAPIError) as error:
+            await c.account()
+    assert error.value.status == 404
+    assert error.value.code == (code if code != "PRIVATE CHAT" else "request_failed")
+    assert "fake-token" not in str(error.value)
+    assert "PRIVATE CHAT" not in str(error.value)

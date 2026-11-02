@@ -281,6 +281,17 @@ class WeChatNativeAdapter(Platform):
                         if event:
                             event.stop_event()
                         return False
+                    if (
+                        thread.endswith("@chatroom")
+                        and mentions is None
+                        and source_status != "replied"
+                    ):
+                        mentions = {"userIds": [source["senderId"]]}
+                if mentions:
+                    await self.client.prepare_group_mentions(
+                        thread, [self.bot_self_id, *mentions.get("userIds", [])]
+                    )
+                if source:
                     current = await self.client.message(message_id)
                     if (
                         current.get("id") != message_id
@@ -319,12 +330,6 @@ class WeChatNativeAdapter(Platform):
                         if event:
                             event.stop_event()
                         return False
-                    if (
-                        thread.endswith("@chatroom")
-                        and mentions is None
-                        and source_status != "replied"
-                    ):
-                        mentions = {"userIds": [source["senderId"]]}
                 quote = None
                 if reply_id is not None:
                     target = (

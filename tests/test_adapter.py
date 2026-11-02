@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 from aiohttp import web
 from conftest import module
+from test_native_client import member_lookup
 
 
 def message(**updates):
@@ -52,6 +53,8 @@ async def make_adapter(serve, tmp_path, msg=None, **options):
     async def handler(req):
         if "/messages/" in req.path:
             return web.json_response(msg)
+        if "/members/" in req.path and req.method == "GET":
+            return web.json_response(member_lookup(req.path.rsplit("/", 1)[-1]))
         if req.method == "POST":
             sent.append((req.headers["Idempotency-Key"], await req.json()))
             return web.json_response(
@@ -167,6 +170,73 @@ async def test_group_mentions_isolation_and_reply_target(serve, tmp_path):
         msg.update(id="m2", senderId="other")
         await adapter.process_native_event(native_event(msg, "2"))
         assert queue.get_nowait().session.session_id != event.session.session_id
+    finally:
+        await adapter.terminate()
+
+
+@pytest.mark.parametrize("outcome", ["accepted", "recalled", "failed"])
+async def test_new_group_refreshes_before_single_send_and_rechecks_recall(serve, tmp_path, outcome):
+    from astrbot.api.event import MessageChain
+
+    requests = []
+    refreshed = False
+    msg = message(threadId="room@chatroom", mentions={"state": "known", "self": True})
+
+    async def serve_new_group(handler):
+        async def native(req):
+            nonlocal refreshed
+            requests.append((req.method, req.path))
+            if req.path.endswith("/members/refresh"):
+                return web.json_response(
+                    {"id": "op1", "accountId": "a", "kind": "metadata", "state": "queued"},
+                    status=202,
+                )
+            if "/operations/" in req.path:
+                refreshed = True
+                if outcome == "recalled":
+                    msg["recall"] = {"observedAt": "now"}
+                return web.json_response(
+                    {
+                        "id": "op1",
+                        "accountId": "a",
+                        "kind": "metadata",
+                        "state": "failed" if outcome == "failed" else "succeeded",
+                    }
+                )
+            if ("/members/" in req.path or req.path.endswith("/sends")) and not refreshed:
+                return web.json_response({"error": {"code": "media_not_cached"}}, status=404)
+            return await handler(req)
+
+        return await serve(native)
+
+    adapter, queue, _, sent = await make_adapter(serve_new_group, tmp_path, msg)
+    adapter.client.poll_interval = 0.001
+    try:
+        await adapter.process_native_event(native_event(msg))
+        event = queue.get_nowait()
+        if outcome == "failed":
+            with pytest.raises(ValueError, match="群成员"):
+                await event.send(MessageChain().message("answer"))
+            assert sent == []
+            assert adapter.state.message_status("m1") == "failed"
+        else:
+            await event.send(MessageChain().message("answer"))
+        if outcome == "recalled":
+            assert sent == []
+            assert event.is_stopped()
+            assert adapter.state.message_status("m1") == "recalled"
+        elif outcome == "accepted":
+            assert sent[0][1] == {
+                "threadId": "room@chatroom",
+                "text": "answer",
+                "mentions": {"userIds": ["user"]},
+            }
+            assert adapter.state.message_status("m1") == "replied"
+        assert requests.count(("POST", "/v1/accounts/a/sends")) == (outcome == "accepted")
+        assert adapter.state.db.execute("SELECT COUNT(*) FROM sends").fetchone()[0] == (
+            outcome == "accepted"
+        )
+        assert requests.count(("POST", "/v1/accounts/a/groups/room@chatroom/members/refresh")) == 1
     finally:
         await adapter.terminate()
 

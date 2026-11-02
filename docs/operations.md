@@ -65,3 +65,18 @@ sqlite3 -readonly /path/to/state.sqlite3 \
 使用安全的本地凭据方式请求，勿把 Token 放进聊天、脚本仓库或终端录屏。
 确认 Native 回执及真实聊天后再由人决定是否补发；不要删除状态库或换 key 来自动“修复”。
 插件不提供自动重试不确定业务动作的按钮。
+
+### 新加入的群回复时返回 404
+
+群回复首段会自动 @原发送者。Native 在发送带 @的文本前，需要从已保存的群成员资料中
+确认机器人和被 @成员；新群资料尚未保存时，可能返回 `404 media_not_cached`，
+成员资料不完整时也可能返回 `409 mention_member_unavailable` 或
+`409 mention_group_membership_unavailable`。旧版插件把这些错误统一显示为 `request_failed`。
+
+插件现在会在发送带 @的群回复前检查所需成员，缺失时调用
+`POST /groups/{groupId}/members/refresh`，等待刷新完成并重新检查成员，再核对原消息是否撤回。
+刷新失败或超时会停止本次回复，不创建发送回执；资料已存在时不会重复刷新。
+此刷新只需原有的 `read` 权限，不需要群管理权限。
+
+升级插件并重启机器人后，在新群重新 @机器人发送一条新消息验证。
+已经标记为 `failed` / `needs_review` / `partial` 的旧回复不会自动补发，仍按上面的回执流程核查。
