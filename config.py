@@ -26,6 +26,7 @@ DEFAULT_CONFIG = {
 }
 
 CONFIG_METADATA = {
+    "logo_token": {"type": "string", "invisible": True},
     "server_url": {
         "type": "string",
         "description": "Native 服务地址",
