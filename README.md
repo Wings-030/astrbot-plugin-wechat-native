@@ -2,10 +2,10 @@
 
 让 AstrBot 通过 **agent-wechat-native /v1 API** 接入个人微信。插件装在 AstrBot 内，不需要额外 Bridge 服务。
 
-支持文本私聊、群聊 @回复、白名单、独立会话、断线重连和持久化去重。
-暂不支持图片、语音、文件及原生引用回复；请关闭该机器人的**文本转图片**功能。
+支持文本私聊、群聊 @回复、群聊摘要、原生引用回复、白名单、独立会话、断线重连和持久化去重。
+暂不支持图片、语音及文件收发；请关闭该机器人的**文本转图片**功能。
 
-适配版本：**AstrBot 4.29.3、Native v1.2.0**；插件运行需要 **Python 3.12+**。
+适配版本：**AstrBot >=4.29.3,<5、Native v1.3.3**；插件运行需要 **Python 3.12+**。
 
 ## 安装与配置
 
@@ -46,6 +46,46 @@ Native Token 需要目标账号的 **read + send** 权限。本文 Compose 让�
 用户 ID 和群 ID 可用 Native 的 `wx contacts find 名字`、`wx chats list` 查询。
 手打 `@名字` 或仅 @全体不会触发默认群回复。分段回复仅首段自动 @原发送者，插件显式输出的 @仍保留。
 AstrBot 的模型开关、全局白名单和插件权限仍需正确配置。
+
+### 群聊摘要
+
+在 WeChat Native **机器人参数**中开启 `enable_group_summary`，保持
+`group_reply_mode: mention`。群里正常聊天后，**真正 @机器人**发送 `总结群聊`
+或 `群聊摘要`，机器人会使用当前 AstrBot 会话的聊天模型整理讨论要点、结论、待办及未解决问题。
+普通群消息仅进入摘要缓存，不会因此触发回复；`all` 模式仍按原规则处理所有群文本。
+
+| 字段 | 默认值 | 说明 |
+| --- | --- | --- |
+| `enable_group_summary` | `false` | 开启后在内存缓存允许群的实时文本，供手动生成摘要 |
+| `summary_max_messages` | `200` | 每群缓存条数，范围 1–500 |
+| `summary_window_minutes` | `60` | 摘要时间范围，单位分钟，范围 1–1440 |
+
+缓存遵守 `allowed_groups`，`disabled` 模式不收集群消息；摘要命令仍经过 AstrBot 的全局白名单和插件权限检查。
+仅包含开启功能后接收到的实时文本，不补取历史、不包含图片/语音、本人发送或已撤回的消息。
+每个机器人所有群合计最多缓存 2000 条，每条最多保留 1000 字符；模型输入不超过 24000 字符，
+超限取最新记录，摘要会注明输入范围及截断情况。
+
+聊天正文仅缓存在内存，重启或停止机器人即清空；过期记录在后续收集或读取缓存时清理。
+触发摘要会把该群选中的记录发送给当前会话配置的模型服务，独立于日常对话历史。
+同群一次只生成一个摘要，60 秒超时会提示重试；无缓存或模型不可用时返回提示。
+生成或发送前发现来源记录撤回、过期或被淘汰，会取消旧摘要，需重新触发。
+
+### 消息引用回复
+
+在机器人使用的 **AstrBot 配置文件**中开启 `platform_settings.reply_with_quote`（引用回复），
+文本回复就会引用触发它的原消息，私聊和群聊均适用。插件也支持消息链中的
+`Reply(id=原消息的 Native id)`；引用目标必须已保存在同一 Native 账号、同一聊天中。
+
+用户发来的引用消息会把评论及可用的内嵌引用文本交给 AstrBot，仍遵守群 @和白名单规则。
+引用内容已撤回、缺失或类型不支持时仅提供状态提示，不读取历史来补取内容。
+摘要缓存仅保留引用消息本身的评论，不展开内嵌原文。
+
+Native v1.3.3 支持引用回复同时 @群成员或 @全体；群内首段回复仍按原规则自动 @原发送者，
+消息链中的显式 @会保留。引用回复正文限 **16 KiB UTF-8**（包括 Native 解析后的 @名称）；不支持的来源由 Native 拒绝，
+不会自动降级成普通文本重发。发送前会检查来源身份及撤回状态，沿用原有回执和去重机制。
+
+Native 的原生引用仍属实验能力，服务端接受不等于已在手机正确显示，需要在实际微信中验证。
+支持的原消息类型与限制见 [Native 引用回复说明](https://github.com/thisnick/agent-wechat/blob/v1.3.3/docs/src/content/docs/use/cli.mdx#quoted-replies)。
 
 ## Docker 部署：同一台 Linux 主机
 
@@ -112,7 +152,7 @@ services:
         max-file: "3"
 
   agent-wechat:
-    image: ghcr.io/thisnick/agent-wechat-native:v1.2.0
+    image: ghcr.io/thisnick/agent-wechat-native:v1.3.3
     container_name: agent-wechat
     restart: unless-stopped
     network_mode: host
@@ -175,7 +215,7 @@ docker compose exec agent-wechat wx --server-name local accounts list
 ```
 
 记下返回的账号 `id`。如需使用已有官方微信资料，按
-[Native 登录说明](https://github.com/thisnick/agent-wechat/blob/v1.2.0/docs/src/content/docs/setup/connect.mdx)
+[Native 登录说明](https://github.com/thisnick/agent-wechat/blob/v1.3.3/docs/src/content/docs/setup/connect.mdx)
 挂载资料目录；使用期间保持官方客户端关闭。
 
 ### 4. 配置 AstrBot 机器人
@@ -250,7 +290,7 @@ ruff format --check .
 使用 Python 3.12 虚拟环境；生产安装由 AstrBot 处理 `requirements.txt`，无需安装开发依赖。
 
 - [AstrBot Docker 部署](https://docs.astrbot.app/deploy/astrbot/docker.html)
-- [Native Docker 部署](https://github.com/thisnick/agent-wechat/tree/v1.2.0/deploy/native)
-- [Native v1.2.0 API](https://github.com/thisnick/agent-wechat/blob/v1.2.0/docs/src/content/docs/use/api.mdx)
+- [Native Docker 部署](https://github.com/thisnick/agent-wechat/tree/v1.3.3/deploy/native)
+- [Native v1.3.3 API](https://github.com/thisnick/agent-wechat/blob/v1.3.3/docs/src/content/docs/use/api.mdx)
 
 本插件采用 [MIT 许可证](LICENSE)。仅接入有权操作的微信账号。

@@ -20,6 +20,9 @@ DEFAULT_CONFIG = {
     "group_reply_mode": "mention",
     "allowed_groups": [],
     "unique_session": True,
+    "enable_group_summary": False,
+    "summary_max_messages": 200,
+    "summary_window_minutes": 60,
 }
 
 CONFIG_METADATA = {
@@ -66,6 +69,21 @@ CONFIG_METADATA = {
         "description": "群内成员独立会话",
         "hint": "关闭后同一个群共享会话；不同账号/聊天始终隔离",
     },
+    "enable_group_summary": {
+        "type": "bool",
+        "description": "启用群聊摘要",
+        "hint": "内存缓存允许群的实时文本；群内真正 @机器人发送“总结群聊”，重启清空",
+    },
+    "summary_max_messages": {
+        "type": "int",
+        "description": "每群摘要缓存条数",
+        "hint": "1–500，默认 200；所有群合计最多 2000 条",
+    },
+    "summary_window_minutes": {
+        "type": "int",
+        "description": "摘要消息时间范围（分钟）",
+        "hint": "1–1440，默认 60；只包含开启功能后收到的实时文本",
+    },
 }
 
 
@@ -80,6 +98,9 @@ class NativeConfig:
     group_reply_mode: str = "mention"
     allowed_groups: frozenset[str] = frozenset()
     unique_session: bool = True
+    enable_group_summary: bool = False
+    summary_max_messages: int = 200
+    summary_window_minutes: int = 60
 
     @classmethod
     def from_dict(cls, data: dict) -> "NativeConfig":
@@ -104,9 +125,16 @@ class NativeConfig:
         mode = data.get("group_reply_mode", "mention")
         if mode not in {"mention", "all", "disabled"}:
             raise ValueError("group_reply_mode 必须为 mention/all/disabled")
-        for key in ("enable_private_reply", "unique_session"):
+        for key in ("enable_private_reply", "unique_session", "enable_group_summary"):
             if key in data and not isinstance(data[key], bool):
                 raise ValueError(f"{key} 必须是布尔值")
+        for key, maximum, default in (
+            ("summary_max_messages", 500, 200),
+            ("summary_window_minutes", 1440, 60),
+        ):
+            value = data.get(key, default)
+            if type(value) is not int or not 1 <= value <= maximum:
+                raise ValueError(f"{key} 必须是 1–{maximum} 的整数")
         lists = {}
         for key in ("allowed_users", "allowed_groups"):
             value = data.get(key, [])
@@ -121,6 +149,9 @@ class NativeConfig:
             enable_private_reply=data.get("enable_private_reply", True),
             group_reply_mode=mode,
             unique_session=data.get("unique_session", True),
+            enable_group_summary=data.get("enable_group_summary", False),
+            summary_max_messages=data.get("summary_max_messages", 200),
+            summary_window_minutes=data.get("summary_window_minutes", 60),
             **lists,
         )
 

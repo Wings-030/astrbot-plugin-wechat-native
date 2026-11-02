@@ -77,14 +77,33 @@ def convert_message(raw: dict, config, self_id: str) -> AstrBotMessage:
     # The unmodified Native mentions remain available in raw_message.
     if group:
         result.message.append(At(qq=self_id))
+    quote = raw.get("quote")
+    if raw.get("type") == 49 and raw.get("appMessageType") == 57 and isinstance(quote, dict):
+        state = quote.get("state")
+        quoted_text = "引用消息内容不可用"
+        if state == "recalled":
+            quoted_text = "引用消息已撤回"
+        elif state == "unsupported":
+            quoted_text = "不支持此引用消息的内容"
+        elif state == "embedded" and isinstance(quote.get("embeddedText"), str):
+            quoted_text = quote["embeddedText"][:16384] or quoted_text
+        result.message.append(
+            Reply(
+                id=quote.get("serverId") if isinstance(quote.get("serverId"), str) else "",
+                sender_id=quote.get("senderId") if isinstance(quote.get("senderId"), str) else "",
+                message_str=quoted_text,
+                chain=[Plain(quoted_text)],
+            )
+        )
     result.message.append(Plain(text))
     result.raw_message = raw
     result.timestamp = message_timestamp(raw) or int(datetime.now(UTC).timestamp())
     return result
 
 
-def serialize_text(chain: MessageChain, *, group: bool) -> tuple[str, dict | None]:
+def serialize_text(chain: MessageChain, *, group: bool) -> tuple[str, dict | None, str | None]:
     text, users, all_members = [], [], False
+    reply_id = None
     for component in chain.chain:
         if isinstance(component, Plain):
             text.append(component.text)
@@ -97,9 +116,10 @@ def serialize_text(chain: MessageChain, *, group: bool) -> tuple[str, dict | Non
         elif isinstance(component, AtAll):
             all_members = True
         elif isinstance(component, Reply):
-            # Native quoted replies cannot be combined with mentions in v1.2.0.
-            # A framework reply decoration carries no additional text.
-            continue
+            target = str(component.id).strip()
+            if not target or (reply_id is not None and reply_id != target):
+                raise ValueError("Native 引用回复需要且只能指定一条原消息")
+            reply_id = target
         else:
             raise ValueError("WeChat Native 首版仅支持文本和群 @，请关闭文本转图片")
     if (users or all_members) and not group:
@@ -107,7 +127,7 @@ def serialize_text(chain: MessageChain, *, group: bool) -> tuple[str, dict | Non
     if users and all_members:
         raise ValueError("不能同时 @个人和 @全体")
     mentions = {"all": True} if all_members else {"userIds": users} if users else None
-    return "".join(text), mentions
+    return "".join(text), mentions, reply_id
 
 
 class WeChatNativeEvent(AstrMessageEvent):

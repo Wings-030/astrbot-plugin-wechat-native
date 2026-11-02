@@ -22,6 +22,7 @@ from .event import (
 )
 from .native_client import NativeAPIError, NativeClient, SendError
 from .state import StateStore, cursor_number
+from .summary import GroupSummaryCache, is_summary_command
 
 
 @register_platform_adapter(
@@ -64,6 +65,7 @@ class WeChatNativeAdapter(Platform):
         self._send_lock = asyncio.Lock()
         self._terminate_lock = asyncio.Lock()
         self._last_time_warning = float("-inf")
+        self.summary_cache = GroupSummaryCache(cfg.summary_max_messages, cfg.summary_window_minutes)
 
     def meta(self) -> PlatformMetadata:
         return PlatformMetadata(
@@ -77,14 +79,16 @@ class WeChatNativeAdapter(Platform):
     def get_client(self):
         return self.client
 
-    def _eligible(self, raw: dict, origin: str) -> bool:
+    def _eligible(self, raw: dict, origin: str, *, summary: bool = False) -> bool:
         cfg = self.native_config
         stamp = message_timestamp(raw)
         now = time.time()
         if (
             origin != "live"
             or raw.get("direction") != "incoming"
-            or raw.get("type") != 1
+            or not (
+                raw.get("type") == 1 or (raw.get("type") == 49 and raw.get("appMessageType") == 57)
+            )
             or raw.get("recall") is not None
             or raw.get("senderId") == self.bot_self_id
             or not isinstance(raw.get("senderId"), str)
@@ -106,13 +110,17 @@ class WeChatNativeAdapter(Platform):
             return False
         thread = raw["threadId"]
         if not thread.endswith("@chatroom"):
-            return cfg.enable_private_reply and (
-                not cfg.allowed_users or raw["senderId"] in cfg.allowed_users
+            return (
+                not summary
+                and cfg.enable_private_reply
+                and (not cfg.allowed_users or raw["senderId"] in cfg.allowed_users)
             )
         if cfg.group_reply_mode == "disabled" or (
             cfg.allowed_groups and thread not in cfg.allowed_groups
         ):
             return False
+        if summary:
+            return cfg.enable_group_summary
         if cfg.group_reply_mode == "all":
             return True
         mentions = raw.get("mentions")
@@ -144,10 +152,20 @@ class WeChatNativeAdapter(Platform):
             ):
                 raise ValueError("invalid_recall_identity")
             self.state.recall(thread, server_id, message_id)
+            self.summary_cache.recall(thread, server_id)
             for active in list(self._events.values()):
                 raw = active.message_obj.raw_message
                 if raw["threadId"] == thread and (raw.get("serverId") == server_id):
                     active.stop_event()
+                elif (
+                    raw["threadId"] == thread
+                    and isinstance(raw.get("quote"), dict)
+                    and raw["quote"].get("serverId") == server_id
+                ):
+                    active.set_extra("wechat_native_quote_invalidated", True)
+                    active.stop_event()
+                    if self.state.message_status(raw["id"]) == "queued":
+                        self.state.mark_message(raw["id"], "no_reply")
             self.state.advance(cursor)
             return
         if event["kind"] != "message.committed":
@@ -169,10 +187,19 @@ class WeChatNativeAdapter(Platform):
         ):
             raise ValueError("message_identity_mismatch")
         eligible = self._eligible(raw, data.get("origin", "unknown"))
-        converted = convert_message(raw, self.native_config, self.bot_self_id) if eligible else None
+        cacheable = self.native_config.enable_group_summary and self._eligible(
+            raw, data.get("origin", "unknown"), summary=True
+        )
+        converted = (
+            convert_message(raw, self.native_config, self.bot_self_id)
+            if eligible or cacheable
+            else None
+        )
         fresh = self.state.accept(
             cursor, message_id, thread, raw.get("serverId"), "queued" if eligible else "ignored"
         )
+        if fresh and cacheable and not is_summary_command(converted.message_str):
+            self.summary_cache.add(raw)
         if fresh and eligible:
             wrapped = WeChatNativeEvent(converted, self)
             try:
@@ -233,11 +260,16 @@ class WeChatNativeAdapter(Platform):
             async with self._send_lock:
                 if self.stopped:
                     raise RuntimeError("WeChat Native 已停止")
-                text, mentions = serialize_text(chain, group=thread.endswith("@chatroom"))
+                if event and event.get_extra("wechat_native_quote_invalidated"):
+                    event.stop_event()
+                    return False
+                text, mentions, reply_id = serialize_text(chain, group=thread.endswith("@chatroom"))
                 if not text.strip():
                     return False
                 if len(text.encode()) > 65536:
                     raise ValueError("Native 文本超过 64 KiB，未发送")
+                if reply_id is not None and len(text.encode()) > 16384:
+                    raise ValueError("Native 引用回复文本超过 16 KiB，未发送")
                 if self.client.closed:
                     raise ValueError("Native 客户端未连接，未提交发送")
                 message_id = source["id"] if source else None
@@ -271,16 +303,69 @@ class WeChatNativeAdapter(Platform):
                         if event:
                             event.stop_event()
                         return False
+                    original_quote = source.get("quote")
+                    current_quote = current.get("quote")
+                    if isinstance(original_quote, dict) and (
+                        not isinstance(current_quote, dict)
+                        or current_quote.get("serverId") != original_quote.get("serverId")
+                        or (
+                            original_quote.get("state") != "recalled"
+                            and current_quote.get("state") == "recalled"
+                        )
+                        or (event and event.get_extra("wechat_native_quote_invalidated"))
+                    ):
+                        if source_status == "queued":
+                            self.state.mark_message(message_id, "no_reply")
+                        if event:
+                            event.stop_event()
+                        return False
                     if (
                         thread.endswith("@chatroom")
                         and mentions is None
                         and source_status != "replied"
                     ):
                         mentions = {"userIds": [source["senderId"]]}
+                quote = None
+                if reply_id is not None:
+                    target = (
+                        current
+                        if source and reply_id == message_id
+                        else await self.client.message(reply_id)
+                    )
+                    if (
+                        target.get("id") != reply_id
+                        or target.get("accountId") != self.native_config.account_id
+                        or target.get("threadId") != thread
+                        or not isinstance(target.get("serverId"), str)
+                        or not target["serverId"]
+                        or target.get("recall") is not None
+                        or self.state.message_status(reply_id) == "recalled"
+                    ):
+                        raise ValueError("Native 引用来源不可用、已撤回或不属于当前账号和聊天")
+                    quote = {"messageId": reply_id, "serverId": target["serverId"]}
+                    # Another target read may overlap source recall or send failure.
+                    if source and self.state.message_status(message_id) == "recalled":
+                        if event:
+                            event.stop_event()
+                        return False
+                    if source and self.state.message_status(message_id) in {
+                        "needs_review",
+                        "failed",
+                        "partial",
+                    }:
+                        raise RuntimeError("此消息的回复需人工检查，禁止自动重发")
+                records = event.get_extra("wechat_native_summary_records") if event else None
+                if event and event.get_extra("wechat_native_quote_invalidated"):
+                    event.stop_event()
+                    return False
+                if records is not None and not self.summary_cache.contains(records):
+                    self.state.mark_message(message_id, "no_reply")
+                    event.stop_event()
+                    return False
                 key = "astrbot-" + uuid.uuid4().hex
                 self.state.begin_send(key, message_id, thread)
                 try:
-                    receipt = await self.client.send_text(thread, text, key, mentions)
+                    receipt = await self.client.send_text(thread, text, key, mentions, quote=quote)
                 except BaseException as error:
                     state = "needs_review"
                     if isinstance(error, SendError) and error.state in {"failed", "cancelled"}:
@@ -331,6 +416,7 @@ class WeChatNativeAdapter(Platform):
             await asyncio.gather(*tasks, return_exceptions=True)
         for event in list(self._events.values()):
             event.stop_event()
+        self.summary_cache.clear()
         await self.client.close()
         self.state.close()
         self._state_closed = True

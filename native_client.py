@@ -1,4 +1,4 @@
-"""agent-wechat-native v1.2.0 /v1 transport; no AstrBot OpenAPI dependency."""
+"""agent-wechat-native v1.3.3 /v1 transport; no AstrBot OpenAPI dependency."""
 
 import asyncio
 import json
@@ -131,9 +131,26 @@ class NativeClient:
             "GET", self.prefix + "/sends/by-idempotency-key", params={"key": key}
         )
 
-    async def send_text(self, thread: str, text: str, key: str, mentions: dict | None = None):
+    async def send_text(
+        self,
+        thread: str,
+        text: str,
+        key: str,
+        mentions: dict | None = None,
+        *,
+        quote: dict | None = None,
+    ):
         if not text.strip() or len(text.encode("utf-8")) > 65536:
             raise ValueError("文本必须非空且不超过 64 KiB（含 @名称）")
+        if quote is not None:
+            if len(text.encode("utf-8")) > 16384:
+                raise ValueError("Native 引用回复文本不能超过 16 KiB")
+            if (
+                not isinstance(quote, dict)
+                or set(quote) != {"messageId", "serverId"}
+                or any(not isinstance(value, str) or not value for value in quote.values())
+            ):
+                raise ValueError("Native 引用需要字符串 messageId 和 serverId")
         if not key or any(ord(x) < 33 or ord(x) > 126 for x in key):
             raise ValueError("无效 Idempotency-Key")
         if self.closed:
@@ -141,6 +158,8 @@ class NativeClient:
         payload = {"threadId": thread, "text": text}
         if mentions:
             payload["mentions"] = mentions
+        if quote is not None:
+            payload["quote"] = quote
         try:
             value = await self._request(
                 "POST", self.prefix + "/sends", json=payload, headers={"Idempotency-Key": key}
