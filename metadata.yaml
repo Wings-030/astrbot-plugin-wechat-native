@@ -1,7 +1,7 @@
 name: astrbot_plugin_wechat_native
 display_name: WeChat Native
 desc: 通过 agent-wechat-native /v1 API 连接个人微信，支持文本私聊、群聊 @、群聊摘要和引用回复。
-version: v0.2.4
+version: v0.2.5
 author: neozhu
 repo: https://github.com/neozhu/astrbot-plugin-wechat-native
 astrbot_version: ">=4.29.3,<5"

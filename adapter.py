@@ -116,9 +116,7 @@ class WeChatNativeAdapter(Platform):
 
     def _classify(self, raw: dict, origin: str) -> str:
         def ignored(reason: str) -> str:
-            logger.debug(
-                "WeChat Native 消息忽略：message=%s reason=%s", raw.get("id"), reason
-            )
+            logger.debug("WeChat Native 消息忽略：message=%s reason=%s", raw.get("id"), reason)
             return "ignore"
 
         if origin != "live":
@@ -225,13 +223,18 @@ class WeChatNativeAdapter(Platform):
             or original.get("type") != 3
         ):
             raise MediaError("unavailable")
-        if original.get("recall") is not None or self.state.message_status(original_id) == "recalled":
+        if (
+            original.get("recall") is not None
+            or self.state.message_status(original_id) == "recalled"
+        ):
             wrapped.set_extra("wechat_native_quote_invalidated", True)
             raise MediaError("recalled")
 
     async def _fetch_quote_original(self, raw: dict, wrapped: WeChatNativeEvent, guard) -> bytes:
         quote = raw["quote"]
-        if not all(isinstance(quote.get(key), str) and quote[key] for key in ("serverId", "senderId")):
+        if not all(
+            isinstance(quote.get(key), str) and quote[key] for key in ("serverId", "senderId")
+        ):
             raise MediaError("unavailable")
         original_id = self.state.find_message_id(raw["threadId"], quote["serverId"])
         if original_id is None:
@@ -242,13 +245,18 @@ class WeChatNativeAdapter(Platform):
             guard()
             logger.warning(
                 "WeChat Native 引用媒体元数据无效，回退同聊天原图：message=%s original=%s",
-                raw["id"], original_id,
+                raw["id"],
+                original_id,
             )
             image_bytes = await self.client.fetch_image(original_id, guard=guard)
             guard()
             await self._check_quote_original(raw, wrapped, original_id)
             current = await self.client.message(raw["id"])
             guard()
+        except MediaError as error:
+            if error.reason == "recalled":
+                wrapped.set_extra("wechat_native_quote_invalidated", True)
+            raise
         except NativeAPIError as error:
             if error.status == 410 or error.code == "message_recalled":
                 wrapped.set_extra("wechat_native_quote_invalidated", True)
@@ -256,15 +264,20 @@ class WeChatNativeAdapter(Platform):
             raise MediaError(
                 "missing_scope" if error.status in {401, 403} else "unavailable"
             ) from None
-        if any(current.get(key) != raw.get(key) for key in ("id", "accountId", "threadId", "serverId")):
+        if any(
+            current.get(key) != raw.get(key) for key in ("id", "accountId", "threadId", "serverId")
+        ):
             raise MediaError("unavailable")
         if current.get("recall") is not None:
             raise MediaError("recalled")
         current_quote = current.get("quote")
         if (
-            current.get("type") != 49 or current.get("appMessageType") != 57
+            current.get("type") != 49
+            or current.get("appMessageType") != 57
             or not isinstance(current_quote, dict)
-            or any(current_quote.get(key) != quote.get(key) for key in ("serverId", "senderId", "type"))
+            or any(
+                current_quote.get(key) != quote.get(key) for key in ("serverId", "senderId", "type")
+            )
             or current_quote.get("state") != "embedded"
             or current_quote.get("embeddedImage") is not True
         ):
@@ -696,7 +709,9 @@ class WeChatNativeAdapter(Platform):
                         if event:
                             event.stop_event()
                         return False
-                    original_id = event.get_extra("wechat_native_quote_original_id") if event else None
+                    original_id = (
+                        event.get_extra("wechat_native_quote_original_id") if event else None
+                    )
                     if original_id:
                         try:
                             await self._check_quote_original(source, event, original_id)

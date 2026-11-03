@@ -358,16 +358,37 @@ async def test_private_quoted_image_resolves_via_current_message_id(serve, tmp_p
 
 
 async def make_quote_fallback_adapter(
-    serve, tmp_path, *, thread="peer", status=409, code="media_metadata_invalid",
-    original_media_error=None, download_hook=None,
+    serve,
+    tmp_path,
+    *,
+    thread="peer",
+    status=409,
+    code="media_metadata_invalid",
+    original_media_error=None,
+    download_hook=None,
 ):
-    original = message(id="original-native-id", serverId="899", senderId="author", type=3,
-                       threadId=thread, body=None)
+    original = message(
+        id="original-native-id",
+        serverId="899",
+        senderId="author",
+        type=3,
+        threadId=thread,
+        body=None,
+    )
     msg = message(
-        id="quote-msg", threadId=thread, type=49, appMessageType=57, body="帮我分析这张图",
+        id="quote-msg",
+        threadId=thread,
+        type=49,
+        appMessageType=57,
+        body="帮我分析这张图",
         mentions={"state": "known", "self": True},
-        quote={"serverId": "899", "senderId": "author", "type": 3,
-               "state": "embedded", "embeddedImage": True},
+        quote={
+            "serverId": "899",
+            "senderId": "author",
+            "type": 3,
+            "state": "embedded",
+            "embeddedImage": True,
+        },
     )
     requests = []
 
@@ -382,12 +403,17 @@ async def make_quote_fallback_adapter(
                 if original_media_error:
                     error_status, error_code = original_media_error
                     return web.json_response({"error": {"code": error_code}}, status=error_status)
-                return web.json_response({"items": [media_asset(
-                    "asset-1", accountId="a", message_id="original-native-id"
-                )]})
+                return web.json_response(
+                    {
+                        "items": [
+                            media_asset("asset-1", accountId="a", message_id="original-native-id")
+                        ]
+                    }
+                )
             if req.path.endswith("/media/asset-1/content") and download_hook:
                 await download_hook(original, msg)
             return await default_handler(req)
+
         return await serve(handler)
 
     adapter, queue, _, sent = await make_adapter(custom_serve, tmp_path, msg)
@@ -399,6 +425,7 @@ async def make_quote_fallback_adapter(
 async def test_quoted_image_metadata_error_uses_verified_original(serve, tmp_path, thread):
     import asyncio
     import base64
+
     from astrbot.api.message_components import Image, Reply
 
     adapter, queue, msg, _, sent, requests = await make_quote_fallback_adapter(
@@ -416,8 +443,10 @@ async def test_quoted_image_metadata_error_uses_verified_original(serve, tmp_pat
         reply = next(part for part in event.get_messages() if isinstance(part, Reply))
         assert not any(isinstance(part, Image) for part in reply.chain)
         media_paths = [path for path in requests if path.endswith("/media")]
-        assert media_paths == ["/v1/accounts/a/messages/quote-msg/media",
-                               "/v1/accounts/a/messages/original-native-id/media"]
+        assert media_paths == [
+            "/v1/accounts/a/messages/quote-msg/media",
+            "/v1/accounts/a/messages/original-native-id/media",
+        ]
         assert sent == []
         await adapter.process_native_event(native_event(msg, "3"))
         assert queue.empty()
@@ -428,12 +457,21 @@ async def test_quoted_image_metadata_error_uses_verified_original(serve, tmp_pat
 
 @pytest.mark.parametrize(
     "changes",
-    [{"accountId": "other"}, {"threadId": "other-peer"}, {"id": "other-id"},
-     {"serverId": "other-server"}, {"senderId": "other-author"}, {"type": 1}],
+    [
+        {"accountId": "other"},
+        {"threadId": "other-peer"},
+        {"id": "other-id"},
+        {"serverId": "other-server"},
+        {"senderId": "other-author"},
+        {"type": 1},
+    ],
 )
 async def test_quoted_image_fallback_rejects_original_identity_changes(serve, tmp_path, changes):
     import asyncio
-    adapter, queue, msg, original, sent, requests = await make_quote_fallback_adapter(serve, tmp_path)
+
+    adapter, queue, msg, original, sent, requests = await make_quote_fallback_adapter(
+        serve, tmp_path
+    )
     original.update(changes)
     try:
         await adapter.process_native_event(native_event(msg, "2"))
@@ -446,8 +484,11 @@ async def test_quoted_image_fallback_rejects_original_identity_changes(serve, tm
 
 
 @pytest.mark.parametrize("known_elsewhere", [False, True])
-async def test_quoted_image_fallback_requires_original_in_same_chat(serve, tmp_path, known_elsewhere):
+async def test_quoted_image_fallback_requires_original_in_same_chat(
+    serve, tmp_path, known_elsewhere
+):
     import asyncio
+
     adapter, queue, msg, _, sent, requests = await make_quote_fallback_adapter(serve, tmp_path)
     msg["quote"]["serverId"] = "unknown-server"
     if known_elsewhere:
@@ -468,6 +509,7 @@ async def test_quoted_image_fallback_original_recall_suppresses_reply(
     serve, tmp_path, after_dispatch
 ):
     import asyncio
+
     from astrbot.api.event import MessageChain
     from astrbot.api.message_components import Plain
 
@@ -491,11 +533,19 @@ async def test_quoted_image_fallback_original_recall_suppresses_reply(
 
 
 @pytest.mark.parametrize(
-    "status,code", [(403, "insufficient_scope"), (404, "media_not_cached"),
-                    (500, "media_metadata_invalid"), (409, "media_integrity_failed")],
+    "status,code",
+    [
+        (403, "insufficient_scope"),
+        (404, "media_not_cached"),
+        (500, "media_metadata_invalid"),
+        (409, "media_integrity_failed"),
+    ],
 )
-async def test_quoted_image_fallback_does_not_mask_other_native_errors(serve, tmp_path, status, code):
+async def test_quoted_image_fallback_does_not_mask_other_native_errors(
+    serve, tmp_path, status, code
+):
     import asyncio
+
     adapter, queue, msg, _, sent, requests = await make_quote_fallback_adapter(
         serve, tmp_path, status=status, code=code
     )
@@ -526,7 +576,9 @@ async def test_quoted_image_fallback_media_recall_keeps_trigger_unrecalled(serve
 
 
 @pytest.mark.parametrize("changed_source", ["original", "quote", "trigger"])
-async def test_quoted_image_fallback_rechecks_sources_after_download(serve, tmp_path, changed_source):
+async def test_quoted_image_fallback_rechecks_sources_after_download(
+    serve, tmp_path, changed_source
+):
     import asyncio
 
     async def change_source(original, msg):
