@@ -3,7 +3,8 @@ from conftest import module
 
 
 def test_config_token_file_and_url(tmp_path):
-    Config = module("config").NativeConfig
+    config_module = module("config")
+    Config = config_module.NativeConfig
     token = tmp_path / "secret"
     token.write_text("synthetic-test-token\n")
     cfg = Config.from_dict(
@@ -17,6 +18,13 @@ def test_config_token_file_and_url(tmp_path):
     assert cfg.load_token() == "synthetic-test-token"
     assert "synthetic-test-token" not in repr(cfg)
     assert cfg.group_reply_mode == "mention"
+    assert cfg.enable_media is True
+    assert config_module.DEFAULT_CONFIG["enable_media"] is True
+    assert config_module.CONFIG_METADATA["enable_media"]["type"] == "bool"
+    assert config_module.MAX_IMAGE_BYTES == 10 * 1024 * 1024
+    assert config_module.MEDIA_DOWNLOAD_TIMEOUT == 60
+    assert config_module.MAX_CONCURRENT_MEDIA_TASKS == 3
+    assert config_module.DEFAULT_IMAGE_PROMPT == "请描述这张图片的内容。"
 
 
 @pytest.mark.parametrize(
@@ -29,6 +37,7 @@ def test_config_token_file_and_url(tmp_path):
         {"group_reply_mode": "maybe"},
         {"allowed_users": "u1,u2"},
         {"enable_private_reply": "false"},
+        {"enable_media": "true"},
         {"token": "bad\nheader"},
     ],
 )
@@ -37,6 +46,64 @@ def test_invalid_config_rejected(change):
     data.update(change)
     with pytest.raises(ValueError):
         module("config").NativeConfig.from_dict(data).load_token()
+
+
+def test_convert_message_attaches_top_level_image_and_default_prompt():
+    from astrbot.api.message_components import At, Image, Plain, Reply
+
+    config_module = module("config")
+    event_module = module("event")
+    cfg = config_module.NativeConfig.from_dict(
+        {"server_url": "http://localhost:6174", "account_id": "a", "token": "fake"}
+    )
+    png_bytes = (
+        b"\x89PNG\r\n\x1a\n"
+        b"\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde"
+        b"\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    direct = event_module.convert_message(
+        {
+            "id": "m1",
+            "threadId": "peer",
+            "senderId": "u1",
+            "type": 3,
+            "body": "",
+        },
+        cfg,
+        "bot",
+        image_bytes=png_bytes,
+    )
+    assert direct.message_str == config_module.DEFAULT_IMAGE_PROMPT
+    assert [type(c) for c in direct.message] == [Plain, Image]
+    assert direct.message[0].text == config_module.DEFAULT_IMAGE_PROMPT
+
+    quoted_group = event_module.convert_message(
+        {
+            "id": "m2",
+            "threadId": "room@chatroom",
+            "senderId": "u1",
+            "type": 49,
+            "appMessageType": 57,
+            "body": "@机器人\u2005",
+            "mentions": {"state": "known", "self": True},
+            "quote": {
+                "serverId": "888",
+                "senderId": "author",
+                "type": 3,
+                "state": "embedded",
+                "embeddedImage": True,
+                "embeddedText": "",
+            },
+        },
+        cfg,
+        "bot",
+        image_bytes=png_bytes,
+    )
+    assert quoted_group.message_str == config_module.DEFAULT_IMAGE_PROMPT
+    assert [type(c) for c in quoted_group.message] == [At, Reply, Plain, Image]
+    reply = quoted_group.message[1]
+    assert reply.message_str == "[图片]"
+    assert not any(isinstance(c, Image) for c in reply.chain)
 
 
 def test_state_deduplicates_atomically_and_survives_restart(tmp_path):

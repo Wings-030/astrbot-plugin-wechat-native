@@ -1,9 +1,22 @@
 import asyncio
+import hashlib
 import json
 
 import pytest
 from aiohttp import web
 from conftest import module
+
+VALID_JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9"
+VALID_PNG = (
+    b"\x89PNG\r\n\x1a\n"
+    b"\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde"
+    b"\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+VALID_GIF = (
+    b"GIF89a\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x00\x00\x00"
+    b"!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;"
+)
+VALID_WEBP = b"RIFF\x10\x00\x00\x00WEBPVP8 \x04\x00\x00\x00\x00\x00\x00\x00"
 
 
 def client(url, **kwargs):
@@ -20,6 +33,32 @@ def receipt(state="accepted", **kwargs):
         "errorCode": None,
         **kwargs,
     }
+
+
+def media_asset(
+    asset_id="asset-1",
+    *,
+    message_id="m1",
+    variant="original",
+    state="available",
+    content_type="image/jpeg",
+    data=VALID_JPEG,
+    **updates,
+):
+    item = {
+        "id": asset_id,
+        "accountId": "account/a",
+        "messageId": message_id,
+        "kind": "image",
+        "variant": variant,
+        "state": state,
+        "contentType": content_type,
+    }
+    if data is not None and state == "available" and content_type != "image/x-wxgf":
+        item["byteLength"] = len(data)
+        item["sha256"] = hashlib.sha256(data).hexdigest()
+    item.update(updates)
+    return item
 
 
 async def test_authenticated_encoded_requests_and_polling(serve):
@@ -352,7 +391,7 @@ async def test_group_member_refresh_must_finish_with_usable_members(serve, outco
             }
         )
 
-    async with client(await serve(handler), poll_interval=0.001, send_timeout=0.02) as c:
+    async with client(await serve(handler), poll_interval=0.001, send_timeout=0.05) as c:
         with pytest.raises(ValueError, match="群成员"):
             await asyncio.wait_for(c.prepare_group_mentions("room@chatroom", ["bot"]), 1)
     assert sum(method == "POST" for method, _ in requests) == 1
@@ -403,3 +442,226 @@ async def test_refresh_failure_reports_safe_operation_diagnostics(serve, code):
     assert operation_id in str(error.value)
     assert "fake-token" not in str(error.value)
     assert "PRIVATE CHAT" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "payload,expected_mime",
+    [
+        (VALID_JPEG, "image/jpeg"),
+        (VALID_PNG, "image/png"),
+        (VALID_GIF, "image/gif"),
+        (VALID_WEBP, "image/webp"),
+    ],
+)
+def test_validate_image_bytes_accepts_supported_formats(payload, expected_mime):
+    api = module("native_client")
+    assert api.validate_image_bytes(payload) == expected_mime
+
+
+@pytest.mark.parametrize(
+    "payload,max_bytes,reason",
+    [
+        (b"", 1024, "unavailable"),
+        (b"wxgf\x00\x01\x02\x03", 1024, "unsupported_format"),
+        (b"   <html><body>not an image</body></html>", 1024, "unsupported_format"),
+        (b"%PDF-1.5\n...", 1024, "unsupported_format"),
+        (b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00", 1024, "unavailable"),
+        (b"\x89PNG\r\n\x1a\ntruncated", 1024, "unavailable"),
+        (b"GIF89a\x01\x00\x01\x00\x00\x00\x00notrailer", 1024, "unavailable"),
+        (b"RIFF\xff\x00\x00\x00WEBPVP8 \x00\x00\x00\x00", 1024, "unavailable"),
+        (VALID_JPEG, 10, "too_large"),
+    ],
+)
+def test_validate_image_bytes_rejects_invalid_or_oversized_content(payload, max_bytes, reason):
+    api = module("native_client")
+    with pytest.raises(api.MediaError) as error:
+        api.validate_image_bytes(payload, max_bytes=max_bytes)
+    assert error.value.reason == reason
+
+
+async def test_fetch_image_transfers_original_when_only_thumbnail_cached(serve):
+    calls = []
+    transferred = False
+
+    async def handler(req):
+        nonlocal transferred
+        calls.append((req.method, req.path, dict(req.query)))
+        if req.path.endswith("/media") and req.method == "GET":
+            items = [
+                media_asset("thumb-1", variant="thumbnail", state="available", data=VALID_GIF),
+                media_asset(
+                    "orig-1",
+                    variant="original",
+                    state="available" if transferred else "pending",
+                    data=VALID_PNG if transferred else None,
+                    content_type="image/png",
+                ),
+            ]
+            return web.json_response({"items": items})
+        if req.path.endswith("/media-transfers") and req.method == "POST":
+            body = await req.json()
+            assert body == {"messageId": "m1", "quality": "original"}
+            return web.json_response(
+                {
+                    "id": "job-1",
+                    "accountId": "account/a",
+                    "kind": "media",
+                    "messageId": "m1",
+                    "assetId": "orig-1",
+                    "state": "queued",
+                },
+                status=202,
+            )
+        if "/jobs/" in req.path:
+            transferred = True
+            return web.json_response(
+                {
+                    "id": "job-1",
+                    "accountId": "account/a",
+                    "kind": "media",
+                    "messageId": "m1",
+                    "assetId": "orig-1",
+                    "state": "succeeded",
+                }
+            )
+        if req.path.endswith("/media/orig-1/content"):
+            return web.Response(body=VALID_PNG, content_type="image/png")
+        return web.Response(status=404)
+
+    async with client(await serve(handler), poll_interval=0.001) as c:
+        data = await c.fetch_image("m1")
+    assert data == VALID_PNG
+    assert sum(m == "POST" and p.endswith("/media-transfers") for m, p, _ in calls) == 1
+    assert any(p.endswith("/media/orig-1/content") for _, p, _ in calls)
+    assert not any(p.endswith("/media/thumb-1/content") for _, p, _ in calls)
+
+
+async def test_fetch_image_reuses_active_job_and_falls_back_to_thumbnail_on_failure(serve):
+    posts = 0
+
+    async def handler(req):
+        nonlocal posts
+        if req.path.endswith("/media-transfers"):
+            posts += 1
+            return web.Response(status=500)
+        if req.path.endswith("/media"):
+            return web.json_response(
+                {
+                    "items": [
+                        media_asset(
+                            "orig-1",
+                            variant="original",
+                            state="running",
+                            jobId="existing-job",
+                            data=None,
+                        ),
+                        media_asset(
+                            "thumb-1", variant="thumbnail", state="available", data=VALID_JPEG
+                        ),
+                    ]
+                }
+            )
+        if req.path.endswith("/jobs/existing-job"):
+            return web.json_response(
+                {
+                    "id": "existing-job",
+                    "accountId": "account/a",
+                    "kind": "media",
+                    "messageId": "m1",
+                    "assetId": "orig-1",
+                    "state": "failed",
+                    "error": {"code": "image_quality_unavailable"},
+                }
+            )
+        if req.path.endswith("/media/thumb-1/content"):
+            return web.Response(body=VALID_JPEG, content_type="image/jpeg")
+        return web.Response(status=404)
+
+    async with client(await serve(handler), poll_interval=0.001) as c:
+        data = await c.fetch_image("m1")
+    assert data == VALID_JPEG
+    assert posts == 0
+
+
+async def test_fetch_image_uses_jpeg_preview_for_wxgf_and_never_requests_raw_wxgf(serve):
+    queries = []
+
+    async def handler(req):
+        if req.path.endswith("/media"):
+            return web.json_response(
+                {
+                    "items": [
+                        media_asset(
+                            "wxgf-1",
+                            variant="original",
+                            state="available",
+                            content_type="image/x-wxgf",
+                            preview={
+                                "state": "available",
+                                "contentType": "image/jpeg",
+                                "byteLength": len(VALID_JPEG),
+                                "sha256": hashlib.sha256(VALID_JPEG).hexdigest(),
+                            },
+                        )
+                    ]
+                }
+            )
+        if req.path.endswith("/media/wxgf-1/content"):
+            queries.append(dict(req.query))
+            if req.query.get("representation") == "preview":
+                return web.Response(body=VALID_JPEG, content_type="image/jpeg")
+            return web.Response(body=b"wxgf-raw-bytes", content_type="image/x-wxgf")
+        return web.Response(status=404)
+
+    async with client(await serve(handler)) as c:
+        data = await c.fetch_image("m1")
+    assert data == VALID_JPEG
+    assert queries == [{"representation": "preview"}]
+
+
+async def test_media_content_stops_immediately_when_stream_exceeds_max_bytes(serve):
+    chunks_sent = 0
+
+    async def handler(req):
+        nonlocal chunks_sent
+        if req.path.endswith("/media"):
+            return web.json_response(
+                {"items": [media_asset("big-1", variant="original", state="available", data=None)]}
+            )
+        response = web.StreamResponse(headers={"Content-Type": "image/jpeg"})
+        await response.prepare(req)
+        for _ in range(10):
+            chunks_sent += 1
+            await response.write(b"\xff\xd8\xff" + b"x" * 600)
+            await asyncio.sleep(0.01)
+        return response
+
+    api = module("native_client")
+    async with client(await serve(handler)) as c:
+        with pytest.raises(api.MediaError) as error:
+            await c.fetch_image("m1", max_bytes=1000)
+    assert error.value.reason == "too_large"
+    assert chunks_sent <= 4
+
+
+@pytest.mark.parametrize(
+    "status,code,quoted,expected_reason",
+    [
+        (403, "insufficient_scope", False, "missing_scope"),
+        (410, "message_recalled", False, "recalled"),
+        (404, "media_not_cached", True, "expired"),
+        (422, "wxgf_decode_failed", False, "unsupported_format"),
+        (413, "image_size_limit", False, "too_large"),
+    ],
+)
+async def test_fetch_image_maps_native_errors_to_domain_reasons(
+    serve, status, code, quoted, expected_reason
+):
+    async def handler(req):
+        return web.json_response({"error": {"code": code}}, status=status)
+
+    api = module("native_client")
+    async with client(await serve(handler)) as c:
+        with pytest.raises(api.MediaError) as error:
+            await c.fetch_image("m1", quoted=quoted)
+    assert error.value.reason == expected_reason

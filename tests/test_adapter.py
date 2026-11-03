@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 from aiohttp import web
 from conftest import module
-from test_native_client import member_lookup
+from test_native_client import VALID_JPEG, VALID_PNG, media_asset, member_lookup
 
 
 def message(**updates):
@@ -46,11 +46,26 @@ def no_telemetry(monkeypatch):
     monkeypatch.setattr(Metric, "upload", upload)
 
 
-async def make_adapter(serve, tmp_path, msg=None, **options):
+async def make_adapter(serve, tmp_path, msg=None, *, media_data=VALID_JPEG, **options):
     msg = msg or message()
     sent = []
 
     async def handler(req):
+        if req.path.endswith("/media") and req.method == "GET":
+            return web.json_response(
+                {
+                    "items": [
+                        media_asset(
+                            "asset-1",
+                            accountId="a",
+                            message_id=msg["id"],
+                            data=media_data,
+                        )
+                    ]
+                }
+            )
+        if req.path.endswith("/media/asset-1/content"):
+            return web.Response(body=media_data, content_type="image/jpeg")
         if "/messages/" in req.path:
             return web.json_response(msg)
         if "/members/" in req.path and req.method == "GET":
@@ -113,7 +128,13 @@ async def test_private_event_real_framework_lifecycle_and_reply(serve, tmp_path)
     [
         ({"direction": "outgoing"}, {}, "live"),
         ({"senderId": "bot"}, {}, "live"),
-        ({"type": 3}, {}, "live"),
+        ({"type": 3}, {"enable_media": False}, "live"),
+        ({"type": 47}, {}, "live"),
+        (
+            {"threadId": "room@chatroom", "type": 3, "body": ""},
+            {"group_reply_mode": "all"},
+            "live",
+        ),
         ({"recall": {"observedAt": "now"}}, {}, "live"),
         ({}, {}, "history"),
         ({}, {}, "unknown"),
@@ -934,3 +955,194 @@ async def test_cancelled_waiting_segment_cannot_be_cleared_by_inflight_success(
         await asyncio.gather(
             *(task for task in (inflight, waiting) if task), return_exceptions=True
         )
+
+
+@pytest.mark.parametrize(
+    "payload,body", [(VALID_JPEG, ""), (VALID_PNG, None), (VALID_JPEG, "看图")]
+)
+async def test_private_direct_image_delivers_astrbot_image_and_default_prompt(
+    serve, tmp_path, payload, body
+):
+    from astrbot.api.message_components import Image, Plain
+
+    msg = message(type=3, body=body)
+    adapter, queue, _, _ = await make_adapter(serve, tmp_path, msg, media_data=payload)
+    try:
+        await adapter.process_native_event(native_event(msg))
+        event = await asyncio.wait_for(queue.get(), 1)
+        expected_text = "看图" if body == "看图" else "请描述这张图片的内容。"
+        assert event.message_str == expected_text
+        components = event.get_messages()
+        assert [type(c) for c in components] == [Plain, Image]
+        assert components[0].text == expected_text
+        await adapter.process_native_event(native_event(msg, "2"))
+        assert queue.empty()
+    finally:
+        await adapter.terminate()
+
+
+@pytest.mark.parametrize(
+    "status,code,expected_reply",
+    [
+        (404, "media_not_available", "图片无法读取，请重新发送。"),
+        (413, "image_size_limit", "图片太大，暂时无法处理。"),
+        (403, "insufficient_scope", "图片读取功能未正确配置，请联系管理员。"),
+        (422, "image_format_unsupported", "暂不支持这种图片格式。"),
+    ],
+)
+async def test_media_errors_send_concise_reply_without_llm_dispatch(
+    serve, tmp_path, status, code, expected_reply
+):
+    msg = message(type=3, body="")
+    sent = []
+
+    async def handler(req):
+        if req.path.endswith("/media"):
+            return web.json_response({"error": {"code": code}}, status=status)
+        if "/messages/" in req.path:
+            return web.json_response(msg)
+        if req.method == "POST" and req.path.endswith("/sends"):
+            sent.append(await req.json())
+            return web.json_response(
+                {"id": "s1", "state": "accepted", "accountId": "a", "destination": "peer"}
+            )
+        return web.Response(status=404)
+
+    url = await serve(handler)
+    adapter = module("adapter").WeChatNativeAdapter(
+        {"server_url": url, "account_id": "a", "token": "fake"},
+        {},
+        asyncio.Queue(),
+        state_dir=tmp_path,
+    )
+    await adapter.client.open()
+    try:
+        await adapter.process_native_event(native_event(msg))
+        await asyncio.gather(*list(adapter._media_tasks))
+        assert adapter._event_queue.empty()
+        assert sent == [{"threadId": "peer", "text": expected_reply}]
+        assert adapter.state.message_status("m1") == "replied"
+    finally:
+        await adapter.terminate()
+
+
+async def test_triggering_image_recall_during_download_silently_cancels(serve, tmp_path):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    msg = message(type=3, body="")
+    sent = []
+
+    async def handler(req):
+        if req.path.endswith("/media"):
+            entered.set()
+            await release.wait()
+            return web.json_response(
+                {"items": [media_asset("a1", accountId="a", message_id="m1", data=VALID_JPEG)]}
+            )
+        if req.method == "POST":
+            sent.append(await req.json())
+        return web.json_response(msg)
+
+    url = await serve(handler)
+    adapter = module("adapter").WeChatNativeAdapter(
+        {"server_url": url, "account_id": "a", "token": "fake"},
+        {},
+        asyncio.Queue(),
+        state_dir=tmp_path,
+    )
+    await adapter.client.open()
+    try:
+        await adapter.process_native_event(native_event(msg))
+        await asyncio.wait_for(entered.wait(), 1)
+        await adapter.process_native_event(
+            {
+                "cursor": "2",
+                "kind": "message.recalled",
+                "data": {"messageId": "m1", "threadId": "peer", "serverId": "900"},
+            }
+        )
+        release.set()
+        await asyncio.gather(*list(adapter._media_tasks), return_exceptions=True)
+        assert adapter._event_queue.empty()
+        assert sent == []
+        assert adapter.state.message_status("m1") == "recalled"
+    finally:
+        release.set()
+        await adapter.terminate()
+
+
+async def test_slow_media_download_does_not_block_concurrent_text_messages(serve, tmp_path):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    img_msg = message(id="m1", serverId="900", type=3, body="")
+    txt_msg = message(id="m2", serverId="901", type=1, body="普通文本")
+
+    async def handler(req):
+        if req.path.endswith("/messages/m1/media"):
+            entered.set()
+            await release.wait()
+            return web.json_response(
+                {"items": [media_asset("a1", accountId="a", message_id="m1", data=VALID_JPEG)]}
+            )
+        if req.path.endswith("/media/a1/content"):
+            return web.Response(body=VALID_JPEG, content_type="image/jpeg")
+        if req.path.endswith("/messages/m1"):
+            return web.json_response(img_msg)
+        if req.path.endswith("/messages/m2"):
+            return web.json_response(txt_msg)
+        return web.Response(status=404)
+
+    url = await serve(handler)
+    queue = asyncio.Queue()
+    adapter = module("adapter").WeChatNativeAdapter(
+        {"server_url": url, "account_id": "a", "token": "fake"},
+        {},
+        queue,
+        state_dir=tmp_path,
+    )
+    await adapter.client.open()
+    try:
+        await adapter.process_native_event(native_event(img_msg, "1"))
+        await asyncio.wait_for(entered.wait(), 1)
+        await adapter.process_native_event(native_event(txt_msg, "2"))
+        first_event = queue.get_nowait()
+        assert first_event.message_str == "普通文本"
+        release.set()
+        second_event = await asyncio.wait_for(queue.get(), 1)
+        assert second_event.message_str == "请描述这张图片的内容。"
+    finally:
+        release.set()
+        await adapter.terminate()
+
+
+async def test_terminate_during_media_download_marks_needs_review_across_restart(serve, tmp_path):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    msg = message(type=3, body="")
+
+    async def handler(req):
+        if req.path.endswith("/media"):
+            entered.set()
+            await release.wait()
+        return web.json_response(msg)
+
+    url = await serve(handler)
+    adapter = module("adapter").WeChatNativeAdapter(
+        {"server_url": url, "account_id": "a", "token": "fake"},
+        {},
+        asyncio.Queue(),
+        state_dir=tmp_path,
+    )
+    await adapter.client.open()
+    try:
+        await adapter.process_native_event(native_event(msg))
+        await asyncio.wait_for(entered.wait(), 1)
+        await adapter.terminate()
+        state = module("state").StateStore(next(tmp_path.glob("*.sqlite3")))
+        try:
+            assert state.message_status("m1") == "needs_review"
+        finally:
+            state.close()
+    finally:
+        release.set()
+        await adapter.terminate()

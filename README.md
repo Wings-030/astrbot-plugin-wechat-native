@@ -2,8 +2,8 @@
 
 让 AstrBot 通过 **agent-wechat-native /v1 API** 接入个人微信。插件装在 AstrBot 内，不需要额外 Bridge 服务。
 
-支持文本私聊、群聊 @回复、群聊摘要、原生引用回复、白名单、独立会话、断线重连和持久化去重。
-暂不支持图片、语音及文件收发；请关闭该机器人的**文本转图片**功能。
+支持文本私聊、图片识别、群聊 @回复、群聊摘要、原生引用回复、白名单、独立会话、断线重连和持久化去重。
+暂不支持语音、文件收发及发送图片；请关闭该机器人的**文本转图片**功能。
 
 适配版本：**AstrBot >=4.29.3,<5、Native v1.3.3**；插件运行需要 **Python 3.12+**。
 
@@ -30,7 +30,7 @@
 | `token_file` | Token 文件的**容器内路径**，优先于 `token` | `/run/secrets/wechat-api-token` |
 | `token` | 不用文件时填写 Native API Token，会保存在 AstrBot 配置里 | 使用文件时留空 |
 
-Native Token 需要目标账号的 **read + send** 权限。本文 Compose 让两个容器读取同一份 Token 文件。
+Native Token 需要目标账号的 **read + send + media** 权限。本文 Compose 让两个容器读取同一份 Token 文件。
 模型 API Key 在 AstrBot 的模型设置中配置；更换 Token 文件后重启机器人。
 
 ### 回复规则
@@ -38,6 +38,7 @@ Native Token 需要目标账号的 **read + send** 权限。本文 Compose 让�
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
 | `enable_private_reply` | `true` | 是否回复私聊 |
+| `enable_media` | `true` | 启用图片识别（支持私聊图片识别，以及群聊中引用图片并 @机器人进行分析） |
 | `allowed_users` | `[]` | 私聊 senderId 白名单；空列表允许所有人，不限制群成员 |
 | `group_reply_mode` | `mention` | `mention`：真正 @机器人；`all`：全部群文本；`disabled`：不回复群聊 |
 | `allowed_groups` | `[]` | 群 threadId 白名单，通常以 `@chatroom` 结尾；空列表允许所有群 |
@@ -87,6 +88,16 @@ Native v1.3.3 支持引用回复同时 @群成员或 @全体；群内首段回�
 
 Native 的原生引用仍属实验能力，服务端接受不等于已在手机正确显示，需要在实际微信中验证。
 支持的原消息类型与限制见 [Native 引用回复说明](https://github.com/thisnick/agent-wechat/blob/v1.3.3/docs/src/content/docs/use/cli.mdx#quoted-replies)。
+
+### 图片识别
+
+开启 `enable_media`（默认开启）并为机器人配置支持视觉（Vision）的模型后，支持以下图片分析场景：
+
+- **私聊直接发图**：直接发送图片，未附带文字时默认使用提示词 `请描述这张图片的内容。`。
+- **私聊引用图片**：引用已收到的图片并提问，按用户问题结合图片内容回复。
+- **群聊引用图片并 @机器人**：引用群内图片并**真正 @机器人**提问（仅 @机器人未附文字时使用默认提示词）。群内直接发图或未 @机器人的引用图片不会自动下载或触发分析，`all` 模式同样要求真正 @机器人；群聊摘要命令优先于引用图片下载。
+
+图片通过 Native Media API 异步拉取（需 Token 具备 `media` 权限），单图上限 10 MiB，超时 60 秒；优先获取高清/原图，WXGF 格式优先使用受支持的预览图。图片已撤回时静默停止，引用图片失效、超限或格式不支持时返回简短提示。实现细节见 [图片识别实现说明](docs/image-recognition.md)。
 
 ## Docker 部署：同一台 Linux 主机
 
@@ -267,7 +278,7 @@ PY
 | 现象 | 检查方法 |
 | --- | --- |
 | 没有 WeChat Native 类型 | 确认插件启用、AstrBot 版本符合要求，刷新页面或重启 |
-| 401 / 403 | 检查 Native Token、账号范围及 read/send 权限 |
+| 401 / 403 | 检查 Native Token、账号范围及 read/send/media 权限 |
 | Token 文件不可读 | 核对容器内路径、挂载文件是否存在、运行用户权限 |
 | 连接拒绝 / 超时 | 从 AstrBot 容器检查地址、网络模式和 Native 是否启动 |
 | API 已连接，微信离线 | 在 Native 完成登录或等待账号恢复连接 |

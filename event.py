@@ -6,8 +6,10 @@ from datetime import UTC, datetime
 from urllib.parse import quote, unquote
 
 from astrbot.api.event import AstrMessageEvent, MessageChain
-from astrbot.api.message_components import At, AtAll, Plain, Reply
+from astrbot.api.message_components import At, AtAll, Image, Plain, Reply
 from astrbot.api.platform import AstrBotMessage, Group, MessageMember, MessageType
+
+from .config import DEFAULT_IMAGE_PROMPT
 
 
 def message_timestamp(raw: dict) -> int | None:
@@ -48,7 +50,9 @@ def session_target(value: str, account: str) -> str:
     return thread
 
 
-def convert_message(raw: dict, config, self_id: str) -> AstrBotMessage:
+def convert_message(
+    raw: dict, config, self_id: str, *, image_bytes: bytes | None = None
+) -> AstrBotMessage:
     result = AstrBotMessage()
     thread, sender = raw["threadId"], raw["senderId"]
     group = thread.endswith("@chatroom")
@@ -60,7 +64,7 @@ def convert_message(raw: dict, config, self_id: str) -> AstrBotMessage:
     result.message_id = raw["id"]
     result.sender = MessageMember(user_id=sender, nickname=sender)
     result.group = Group(group_id=thread) if group else None
-    text = raw["body"]
+    text = raw["body"] if isinstance(raw.get("body"), str) else ""
     mentions = raw.get("mentions")
     if (
         group
@@ -71,6 +75,8 @@ def convert_message(raw: dict, config, self_id: str) -> AstrBotMessage:
         # WeChat terminates visible mention labels with U+2005. Keep the raw
         # body intact, and never treat an ordinary typed @name as metadata.
         text = re.sub(r"^(?:@[^\u2005\r\n]+\u2005[ \t]*)+", "", text)
+    if image_bytes is not None and not text.strip():
+        text = DEFAULT_IMAGE_PROMPT
     result.message_str = text
     result.message = []
     # In all mode this is an explicit policy wake marker, not evidence of a real @.
@@ -81,7 +87,16 @@ def convert_message(raw: dict, config, self_id: str) -> AstrBotMessage:
     if raw.get("type") == 49 and raw.get("appMessageType") == 57 and isinstance(quote, dict):
         state = quote.get("state")
         quoted_text = "引用消息内容不可用"
-        if state == "recalled":
+        if image_bytes is not None and quote.get("type") == 3:
+            if (
+                state == "embedded"
+                and isinstance(quote.get("embeddedText"), str)
+                and quote["embeddedText"].strip()
+            ):
+                quoted_text = quote["embeddedText"][:16384]
+            else:
+                quoted_text = "[图片]"
+        elif state == "recalled":
             quoted_text = "引用消息已撤回"
         elif state == "unsupported":
             quoted_text = "不支持此引用消息的内容"
@@ -96,6 +111,8 @@ def convert_message(raw: dict, config, self_id: str) -> AstrBotMessage:
             )
         )
     result.message.append(Plain(text))
+    if image_bytes is not None:
+        result.message.append(Image.fromBytes(image_bytes))
     result.raw_message = raw
     result.timestamp = message_timestamp(raw) or int(datetime.now(UTC).timestamp())
     return result

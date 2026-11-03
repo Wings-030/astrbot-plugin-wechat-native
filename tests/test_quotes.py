@@ -311,3 +311,178 @@ async def test_embedded_reference_recall_cancels_reply(serve, tmp_path, use_reca
         assert adapter.state.message_status("m1") == "no_reply"
     finally:
         await adapter.terminate()
+
+
+async def test_private_quoted_image_resolves_via_current_message_id(serve, tmp_path):
+    import asyncio
+
+    from astrbot.api.message_components import Image, Plain, Reply
+
+    media_paths = []
+    msg = message(
+        id="quote-msg-1",
+        type=49,
+        appMessageType=57,
+        body="帮我看看这张图",
+        quote={
+            "serverId": "original-server-id-899",
+            "type": 3,
+            "state": "embedded",
+            "senderId": "author",
+            "embeddedImage": True,
+            "embeddedText": "",
+        },
+    )
+
+    async def custom_serve(default_handler):
+        async def handler(req):
+            if req.path.endswith("/media"):
+                media_paths.append(req.path)
+            return await default_handler(req)
+
+        return await serve(handler)
+
+    adapter, queue, _, _ = await make_adapter(custom_serve, tmp_path, msg)
+    try:
+        await adapter.process_native_event(native_event(msg))
+        event = await asyncio.wait_for(queue.get(), 1)
+        assert media_paths == ["/v1/accounts/a/messages/quote-msg-1/media"]
+        assert event.message_str == "帮我看看这张图"
+        components = event.get_messages()
+        assert [type(c) for c in components] == [Reply, Plain, Image]
+        assert components[0].message_str == "[图片]"
+        assert "不支持" not in components[0].message_str
+        assert not any(isinstance(c, Image) for c in components[0].chain)
+    finally:
+        await adapter.terminate()
+
+
+@pytest.mark.parametrize(
+    "mode,mentioned,body,expected_prompt",
+    [
+        ("mention", True, "@机器人\u2005帮我分析这张图", "帮我分析这张图"),
+        ("mention", True, "@机器人\u2005", "请描述这张图片的内容。"),
+        ("all", True, "@机器人\u2005看看", "看看"),
+        ("mention", False, "帮我分析这张图", None),
+        ("all", False, "帮我分析这张图", None),
+        ("disabled", True, "@机器人\u2005帮我分析这张图", None),
+    ],
+)
+async def test_group_quoted_image_requires_genuine_mention_even_in_all_mode(
+    serve, tmp_path, mode, mentioned, body, expected_prompt
+):
+    import asyncio
+
+    from astrbot.api.message_components import At, Image, Plain, Reply
+
+    media_requests = []
+    msg = message(
+        threadId="room@chatroom",
+        type=49,
+        appMessageType=57,
+        body=body,
+        mentions={"state": "known", "self": mentioned},
+        quote={
+            "serverId": "899",
+            "type": 3,
+            "state": "embedded",
+            "senderId": "author",
+            "embeddedImage": True,
+        },
+    )
+
+    async def custom_serve(default_handler):
+        async def handler(req):
+            if "/media" in req.path:
+                media_requests.append(req.path)
+            return await default_handler(req)
+
+        return await serve(handler)
+
+    adapter, queue, _, _ = await make_adapter(custom_serve, tmp_path, msg, group_reply_mode=mode)
+    try:
+        await adapter.process_native_event(native_event(msg))
+        if expected_prompt is None:
+            assert not adapter._media_tasks
+            assert queue.empty()
+            assert media_requests == []
+        else:
+            event = await asyncio.wait_for(queue.get(), 1)
+            assert event.message_str == expected_prompt
+            assert [type(c) for c in event.get_messages()] == [At, Reply, Plain, Image]
+            assert len(media_requests) == 2
+    finally:
+        await adapter.terminate()
+
+
+async def test_group_summary_command_on_quoted_image_skips_media_download(serve, tmp_path):
+    media_requests = []
+    msg = message(
+        threadId="room@chatroom",
+        type=49,
+        appMessageType=57,
+        body="@机器人\u2005总结群聊",
+        mentions={"state": "known", "self": True},
+        quote={
+            "serverId": "899",
+            "type": 3,
+            "state": "embedded",
+            "senderId": "author",
+            "embeddedImage": True,
+        },
+    )
+
+    async def custom_serve(default_handler):
+        async def handler(req):
+            if "/media" in req.path:
+                media_requests.append(req.path)
+            return await default_handler(req)
+
+        return await serve(handler)
+
+    adapter, queue, _, _ = await make_adapter(
+        custom_serve, tmp_path, msg, enable_group_summary=True
+    )
+    try:
+        await adapter.process_native_event(native_event(msg))
+        assert not adapter._media_tasks
+        event = queue.get_nowait()
+        assert event.message_str == "总结群聊"
+        assert media_requests == []
+    finally:
+        await adapter.terminate()
+
+
+@pytest.mark.parametrize(
+    "quote_state,embedded,expected_reply",
+    [
+        ("missing", False, ["引用的图片已失效，请重新发送。"]),
+        ("recalled", False, []),
+    ],
+)
+async def test_expired_or_recalled_quoted_image_obeys_quote_protection(
+    serve, tmp_path, quote_state, embedded, expected_reply
+):
+    import asyncio
+
+    msg = message(
+        type=49,
+        appMessageType=57,
+        body="帮我看看这张图",
+        quote={
+            "serverId": "899",
+            "type": 3,
+            "state": quote_state,
+            "senderId": "author",
+            "embeddedImage": embedded,
+        },
+    )
+    adapter, queue, _, sent = await make_adapter(serve, tmp_path, msg)
+    try:
+        await adapter.process_native_event(native_event(msg))
+        await asyncio.gather(*list(adapter._media_tasks))
+        assert queue.empty()
+        assert [payload["text"] for _, payload in sent] == expected_reply
+        assert adapter.state.message_status("m1") == ("replied" if expected_reply else "no_reply")
+    finally:
+        await adapter.terminate()

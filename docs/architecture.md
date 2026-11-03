@@ -1,8 +1,8 @@
 # 架构说明
 
-[返回 README](../README.md)
+[返回 README](../README.md) | [图片识别实现说明](image-recognition.md)
 
-本页说明 `astrbot-plugin-wechat-native` 的进程边界、状态机、事件流向与代码结构，供开发与排障参考。安装配置见 [README](../README.md)，回执排障见 [运维说明](operations.md)。
+本页说明 `astrbot-plugin-wechat-native` 的进程边界、状态机、事件流向与代码结构，供开发与排障参考。安装配置见 [README](../README.md)，回执排障见 [运维说明](operations.md)，图片识别细节见 [图片识别实现说明](image-recognition.md)。
 
 ## Overview
 
@@ -34,9 +34,9 @@
 
 接着适配器调用 `client.events(self.state.cursor)` 订阅 `/accounts/{id}/events/stream`。SSE 解析器跳过以冒号开头的心跳注释，限制单帧不超过 1 MiB，并在校验游标单调性后交由 `process_native_event` 处理：
 
-* **撤回事件 `message.recalled`**。`process_native_event` 调用 `state.recall()` 写入撤回墓碑并将对应消息标为 `recalled`，同时从 `summary_cache.recall()` 中剔除该记录。随后遍历当前活跃的 `_events` 弱引用字典。若正在处理的事件本身被撤回，直接调用 `active.stop_event()`。若正在处理的事件引用了这封被撤回的消息，则设置 `wechat_native_quote_invalidated = True`、终止事件并将 `queued` 状态标为 `no_reply`。
-* **新消息事件 `message.committed`**。由于 SSE 帧不包含消息正文，`process_native_event` 调用 `client.message(message_id)` 拉取完整消息并校验 `id`、`accountId` 与 `threadId`。随后通过 `_eligible` 执行准入过滤，要求满足 `origin == "live"`、`direction == "incoming"`、消息类型为纯文本 `type == 1` 或引用回复 `type == 49` 且 `appMessageType == 57`、未被撤回、非机器人自身发送、时间戳偏差在 `-60s` 至 `+300s` 之间，且符合私聊或群聊白名单与触发模式。图片及富媒体消息目前在此处被过滤丢弃。
-* **格式转换与入队移交**。`convert_message`（[`event.py`](../event.py)）将原始字典转为 `AstrBotMessage`。当群消息明确 `@` 机器人时，即 `mentions.state == "known"` 且 `mentions.self is True`，正则会剥离正文前导的 `@昵称\u2005` 标签。同时，所有群消息都会在组件列表头部注入合成的 `At(qq=self_id)`，以便在 `group_reply_mode == "all"` 模式下通过 AstrBot 核心的唤醒检查。接着 `state.accept()` 在单个 SQLite 事务中检查 `recalls` 墓碑、写入 `messages` 状态并推进 `checkpoint` 游标。若是新消息且符合条件，则写入 `summary_cache.add()` 并通过 `self.commit_event` 提交 `WeChatNativeEvent` 给 AstrBot。
+* **撤回事件 `message.recalled`**。`process_native_event` 调用 `state.recall()` 写入撤回墓碑并将对应消息标为 `recalled`，同时从 `summary_cache.recall()` 中剔除该记录。随后遍历当前活跃的 `_events` 弱引用字典。若正在处理的事件本身被撤回，直接调用 `active.stop_event()` 并取消在途媒体下载任务。若正在处理的事件引用了这封被撤回的消息，则设置 `wechat_native_quote_invalidated = True`、终止事件、取消在途媒体下载任务并将 `queued` 状态标为 `no_reply`。
+* **新消息事件 `message.committed`**。由于 SSE 帧不包含消息正文，`process_native_event` 调用 `client.message(message_id)` 拉取完整消息并校验 `id`、`accountId` 与 `threadId`。随后通过 `_classify` 将消息分为 `"ignore"`、`"text"` 或 `"media"`。准入条件要求满足 `origin == "live"`、`direction == "incoming"`、未被撤回、非机器人自身发送、时间戳偏差在 `-60s` 至 `+300s` 之间，且符合私聊或群聊白名单与触发模式。开启 `enable_media` 时，私聊直接发图（`type == 3`）、私聊引用图片（`type == 49, appMessageType == 57, quote.type == 3`）以及群聊引用图片并真正 `@` 机器人会进入 `"media"` 异步下载管线，其余非文本富媒体被过滤丢弃。
+* **格式转换与入队移交**。`convert_message`（[`event.py`](../event.py)）将原始字典转为 `AstrBotMessage`。当群消息明确 `@` 机器人时，即 `mentions.state == "known"` 且 `mentions.self is True`，正则会剥离正文前导的 `@昵称\u2005` 标签。同时，所有群消息都会在组件列表头部注入合成的 `At(qq=self_id)`，以便在 `group_reply_mode == "all"` 模式下通过 AstrBot 核心的唤醒检查。接着 `state.accept()` 在单个 SQLite 事务中检查 `recalls` 墓碑、写入 `messages` 状态并推进 `checkpoint` 游标。若是 `"text"` 消息则立即通过 `self.commit_event` 提交 `WeChatNativeEvent` 给 AstrBot。若是 `"media"` 消息则在 `_media_semaphore` 限流下异步调用 `client.fetch_image` 拉取并校验图片字节，再构造带顶层 `Image` 组件的事件提交给 AstrBot。
 
 ### 3. 出站发送管线与群聊摘要
 
@@ -87,9 +87,9 @@ sequenceDiagram
 ## Where things live
 
 * [`main.py`](../main.py) 定义 `WeChatNativePlugin`，负责注册适配器、挂载连接检测 Web 路由以及实现 `/总结群聊` 指令处理器。
-* [`adapter.py`](../adapter.py) 定义 `WeChatNativeAdapter`，包含 SSE 重连循环 `run`、事件分发 `process_native_event`、消息准入过滤 `_eligible`、串行化出站管线 `send_chain` 与优雅停机 `terminate`。
-* [`config.py`](../config.py) 定义不可变数据类 `NativeConfig`，负责校验 URL 格式、白名单列表、摘要参数范围以及从磁盘加载 Token。
-* [`native_client.py`](../native_client.py) 定义 `NativeClient`、`NativeAPIError`、`SendError` 与 `GroupMembersUnavailable`，封装针对 `agent-wechat-native` 的网络交互与错误脱敏。
+* [`adapter.py`](../adapter.py) 定义 `WeChatNativeAdapter`，包含 SSE 重连循环 `run`、事件分发 `process_native_event`、消息分类 `_classify`、异步图片处理 `_process_media_message`、串行化出站管线 `send_chain` 与优雅停机 `terminate`。
+* [`config.py`](../config.py) 定义不可变数据类 `NativeConfig`，负责校验 URL 格式、图片识别开关 `enable_media`、白名单列表、摘要参数范围以及从磁盘加载 Token。
+* [`native_client.py`](../native_client.py) 定义 `NativeClient`、`NativeAPIError`、`MediaError`、`SendError`、`GroupMembersUnavailable` 与 `validate_image_bytes`，封装针对 `agent-wechat-native` 的网络交互、媒体下载与错误脱敏。
 * [`state.py`](../state.py) 定义 `StateStore` 与 `StateIdentityError`，管理游标推进、撤回墓碑、崩溃恢复状态转移和发送回执记录。
 * [`event.py`](../event.py) 定义 `convert_message`、`serialize_text`、`session_id`、`session_target` 以及重写了 `send` 和 `send_streaming` 的 `WeChatNativeEvent`。
 * [`summary.py`](../summary.py) 定义 `GroupSummaryCache`、`SummaryMessage` 与 `summary_prompt`，在内存中按时间窗口和条数上限维护可撤回的群文本快照。
@@ -102,4 +102,4 @@ sequenceDiagram
 * **微信 `@` 标签的专用分隔符是 `U+2005`**。微信客户端生成的真实 `@昵称` 后方紧跟四分之一空格 `\u2005`，而非普通 ASCII 空格。`convert_message` 仅在 `mentions.self is True` 时按 `\u2005` 剥离前缀，普通手打的 `@名字 ` 不会被当成元数据剥离。
 * **多段发送的部分失败锁定**。如果一次回复包含多次 `send` 调用，当第一段成功变为 `replied` 而后续分段失败时，`StateStore.mark_message` 会将消息状态锁定为不可逆的 `partial`。一旦进入 `needs_review`、`failed` 或 `partial` 状态，后续任何针对该消息的 `send_chain` 调用都会抛出 `RuntimeError` 拒绝重发。
 * **流式输出被降级为单次拼接发送**。个人微信不支持流式编辑。`WeChatNativeEvent.send_streaming` 会消费完整个异步生成器，将所有分段拼接为一个完整 `MessageChain` 后调用一次 `self.send(chain)`。
-* **目前仅支持纯文本与引用文本**。`_eligible` 仅放行 `type == 1` 和 `type == 49 / appMessageType == 57`，且 `serialize_text` 遇到非文本组件会直接抛出 `ValueError`。工作区中的 `docs/superpowers/specs/wechat-native-image-recognition.md` 目前是未跟踪的空文件，图片识别能力尚未实现。
+* **入站支持图片识别，出站仍仅支持纯文本与引用文本**。`_classify` 支持私聊直接图片、私聊引用图片及群聊 `@` 机器人的引用图片识别，细节见 [图片识别实现说明](image-recognition.md)。出站 `serialize_text` 遇到非文本组件仍会直接抛出 `ValueError`，需保持机器人的文本转图片功能关闭。

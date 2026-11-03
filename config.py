@@ -7,6 +7,11 @@ from urllib.parse import urlsplit
 PLUGIN_ID = "astrbot_plugin_wechat_native"
 ADAPTER_ID = "wechat_native"
 
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MEDIA_DOWNLOAD_TIMEOUT = 60
+MAX_CONCURRENT_MEDIA_TASKS = 3
+DEFAULT_IMAGE_PROMPT = "请描述这张图片的内容。"
+
 DEFAULT_CONFIG = {
     "id": "wechat_native",
     "type": ADAPTER_ID,
@@ -16,6 +21,7 @@ DEFAULT_CONFIG = {
     "token": "",
     "token_file": "",
     "enable_private_reply": True,
+    "enable_media": True,
     "allowed_users": [],
     "group_reply_mode": "mention",
     "allowed_groups": [],
@@ -49,6 +55,11 @@ CONFIG_METADATA = {
         "hint": "AstrBot 容器内可读路径；不要填写 Native 宿主机上未挂载的路径",
     },
     "enable_private_reply": {"type": "bool", "description": "启用私聊回复"},
+    "enable_media": {
+        "type": "bool",
+        "description": "启用图片识别",
+        "hint": "支持私聊图片识别，以及群聊中引用图片并 @机器人进行分析。",
+    },
     "allowed_users": {
         "type": "list",
         "description": "私聊用户白名单",
@@ -95,6 +106,7 @@ class NativeConfig:
     token: str = field(repr=False)
     token_file: str = field(repr=False)
     enable_private_reply: bool = True
+    enable_media: bool = True
     allowed_users: frozenset[str] = frozenset()
     group_reply_mode: str = "mention"
     allowed_groups: frozenset[str] = frozenset()
@@ -126,7 +138,12 @@ class NativeConfig:
         mode = data.get("group_reply_mode", "mention")
         if mode not in {"mention", "all", "disabled"}:
             raise ValueError("group_reply_mode 必须为 mention/all/disabled")
-        for key in ("enable_private_reply", "unique_session", "enable_group_summary"):
+        for key in (
+            "enable_private_reply",
+            "enable_media",
+            "unique_session",
+            "enable_group_summary",
+        ):
             if key in data and not isinstance(data[key], bool):
                 raise ValueError(f"{key} 必须是布尔值")
         for key, maximum, default in (
@@ -148,6 +165,7 @@ class NativeConfig:
             token=data.get("token", ""),
             token_file=data.get("token_file", ""),
             enable_private_reply=data.get("enable_private_reply", True),
+            enable_media=data.get("enable_media", True),
             group_reply_mode=mode,
             unique_session=data.get("unique_session", True),
             enable_group_summary=data.get("enable_group_summary", False),
