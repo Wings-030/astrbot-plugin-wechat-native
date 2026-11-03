@@ -3,12 +3,14 @@
 import asyncio
 
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star
+from astrbot.core.agent.message import TextPart
 
 from .adapter import WeChatNativeAdapter  # noqa: F401
 from .config import PLUGIN_ID
 from .connection_view import ConnectionView
-from .event import WeChatNativeEvent
+from .event import PDF_CONTEXT_MARKER, WeChatNativeEvent, pdf_context_text
 from .summary import SUMMARY_SYSTEM_PROMPT, summary_prompt
 
 
@@ -22,6 +24,23 @@ class WeChatNativePlugin(Star):
         )
         context.register_web_api(
             f"/{PLUGIN_ID}/connection/check", view.check, ["GET"], "只读测试 Native 连接"
+        )
+
+    @filter.on_llm_request()
+    async def attach_pdf_text(self, event: AstrMessageEvent, req: ProviderRequest):
+        """把 PDF 提取出的文字作为参考资料交给模型；用户的提问仍保留在 prompt 中。"""
+        if not isinstance(event, WeChatNativeEvent):
+            return
+        pdf = event.get_extra("wechat_native_pdf")
+        if not isinstance(pdf, dict) or not pdf.get("text"):
+            return
+        if any(
+            isinstance(part, TextPart) and part.text.startswith(PDF_CONTEXT_MARKER)
+            for part in req.extra_user_content_parts
+        ):
+            return
+        req.extra_user_content_parts.append(
+            TextPart(text=pdf_context_text(str(pdf.get("name") or "未命名.pdf"), pdf["text"]))
         )
 
     @filter.command("总结群聊", alias={"群聊摘要"})

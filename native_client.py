@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import io
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -11,7 +12,13 @@ from uuid import UUID
 import aiohttp
 from aiohttp.http_exceptions import LineTooLong
 
-from .config import MAX_IMAGE_BYTES, MEDIA_DOWNLOAD_TIMEOUT
+from .config import (
+    MAX_IMAGE_BYTES,
+    MAX_PDF_BYTES,
+    MAX_PDF_PAGES,
+    MAX_PDF_TEXT_CHARS,
+    MEDIA_DOWNLOAD_TIMEOUT,
+)
 from .state import cursor_number
 
 logger = logging.getLogger("astrbot")
@@ -71,6 +78,19 @@ MEDIA_ERROR_MESSAGES = {
     "recent_unavailable": "未找到你在本群最近2分钟发送的图片，请重新发送或引用图片。",
 }
 
+PDF_ERROR_MESSAGES = {
+    "unavailable": "PDF 文件无法读取，请重新发送。",
+    "expired": "引用的 PDF 文件已失效，请重新发送。",
+    "too_large": "PDF 文件太大，暂时无法处理。",
+    "missing_scope": "文件读取功能未正确配置，请联系管理员。",
+    "unsupported_format": "PDF 文件已损坏或格式无效，请检查后重试。",
+    "recalled": "",
+    "recent_unavailable": "未找到你在本群最近2分钟发送的 PDF 文件，请重新发送或引用该文件。",
+    "encrypted_pdf": "该 PDF 文件已加密，暂时无法解析内容。",
+    "empty_pdf_text": "未能从该 PDF 中提取到文字（可能是扫描件或纯图片 PDF），暂时无法解析。",
+    "not_pdf": "",
+}
+
 _VARIANT_RANK = {"original": 0, "standard": 1, "thumbnail": 2}
 _NON_TRANSFERABLE_STATES = {
     "available",
@@ -90,14 +110,19 @@ class NativeAPIError(Exception):
 
 
 class MediaError(Exception):
-    def __init__(self, reason: str = "unavailable"):
-        self.reason = reason if reason in MEDIA_ERROR_MESSAGES else "unavailable"
-        self.user_message = MEDIA_ERROR_MESSAGES[self.reason]
+    def __init__(self, reason: str = "unavailable", *, media_kind: str = "image"):
+        self.media_kind = "pdf" if media_kind == "pdf" else "image"
+        messages = PDF_ERROR_MESSAGES if self.media_kind == "pdf" else MEDIA_ERROR_MESSAGES
+        self.reason = reason if reason in messages else "unavailable"
+        self.user_message = messages[self.reason]
         super().__init__(f"Native media error: {self.reason}")
 
 
 class QuotedMediaMetadataError(MediaError):
     """Native rejected the embedded quote's download metadata."""
+
+    def __init__(self, *, media_kind: str = "image"):
+        super().__init__("unavailable", media_kind=media_kind)
 
 
 class SendError(Exception):
@@ -161,19 +186,21 @@ def _extract_job_error_code(job: dict) -> str:
     return "request_failed"
 
 
-def _map_media_code(code: str | None, *, quoted: bool = False, status: int = 0) -> MediaError:
+def _map_media_code(
+    code: str | None, *, quoted: bool = False, status: int = 0, media_kind: str = "image"
+) -> MediaError:
     if status in {401, 403} or code in {"unauthorized", "forbidden", "insufficient_scope"}:
-        return MediaError("missing_scope")
+        return MediaError("missing_scope", media_kind=media_kind)
     if code == "message_recalled" or (status == 410 and code != "event_cursor_expired"):
-        return MediaError("recalled")
+        return MediaError("recalled", media_kind=media_kind)
     if status == 413 or code in {"image_size_limit", "source_size_limit", "wxgf_preview_limit"}:
-        return MediaError("too_large")
+        return MediaError("too_large", media_kind=media_kind)
     if code == "media_expired" or (
         quoted
         and status == 404
         and code in {"not_found", "media_not_cached", "media_asset_not_found"}
     ):
-        return MediaError("expired")
+        return MediaError("expired", media_kind=media_kind)
     if code in {
         "unsupported_media",
         "unsupported_application_media",
@@ -185,8 +212,89 @@ def _map_media_code(code: str | None, *, quoted: bool = False, status: int = 0) 
         "wxgf_decoder_unavailable",
         "wxgf_decode_timeout",
     }:
-        return MediaError("unsupported_format")
-    return MediaError("unavailable")
+        return MediaError("unsupported_format", media_kind=media_kind)
+    return MediaError("unavailable", media_kind=media_kind)
+
+
+def is_pdf_filename(filename: str | None) -> bool:
+    if not isinstance(filename, str):
+        return False
+    cleaned = filename.strip()
+    if (
+        not cleaned
+        or len(cleaned) > 255
+        or "/" in cleaned
+        or "\\" in cleaned
+        or any(ord(c) < 32 or ord(c) == 127 for c in cleaned)
+    ):
+        return False
+    return cleaned.lower().endswith(".pdf")
+
+
+def validate_pdf_bytes(data: bytes, *, max_bytes: int = MAX_PDF_BYTES) -> str:
+    if not isinstance(data, (bytes, bytearray)) or not data:
+        raise MediaError("unavailable", media_kind="pdf")
+    if len(data) > max_bytes:
+        raise MediaError("too_large", media_kind="pdf")
+    if data[:4].lower() == b"wxgf" or data.lstrip()[:1] == b"<":
+        raise MediaError("unsupported_format", media_kind="pdf")
+    header_pos = data[:1024].find(b"%PDF-")
+    if header_pos < 0 or len(data) < header_pos + 8:
+        raise MediaError("unsupported_format", media_kind="pdf")
+    return "application/pdf"
+
+
+def extract_pdf_text(
+    data: bytes,
+    *,
+    max_bytes: int = MAX_PDF_BYTES,
+    max_pages: int = MAX_PDF_PAGES,
+    max_chars: int = MAX_PDF_TEXT_CHARS,
+) -> str:
+    """Extract bounded text from an in-memory PDF. Nothing is written to disk."""
+    validate_pdf_bytes(data, max_bytes=max_bytes)
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(io.BytesIO(bytes(data)), strict=False)
+        if reader.is_encrypted:
+            try:
+                decrypted = reader.decrypt("")
+            except Exception:
+                decrypted = 0
+            if not decrypted:
+                raise MediaError("encrypted_pdf", media_kind="pdf")
+        total_pages = len(reader.pages)
+    except MediaError:
+        raise
+    except Exception:
+        raise MediaError("unsupported_format", media_kind="pdf") from None
+    if total_pages <= 0:
+        raise MediaError("empty_pdf_text", media_kind="pdf")
+    sections: list[str] = []
+    size = 0
+    try:
+        for index in range(min(total_pages, max_pages)):
+            text = (reader.pages[index].extract_text() or "").replace("\x00", "").strip()
+            if not text:
+                continue
+            section = f"[第 {index + 1} 页]\n{text}"
+            sections.append(section)
+            size += len(section) + 2
+            if size > max_chars:
+                break
+    except Exception:
+        if not sections:
+            raise MediaError("unsupported_format", media_kind="pdf") from None
+    if not sections:
+        raise MediaError("empty_pdf_text", media_kind="pdf")
+    combined = "\n\n".join(sections)
+    truncated = total_pages > max_pages or len(combined) > max_chars
+    if len(combined) > max_chars:
+        combined = combined[:max_chars].rstrip()
+    if truncated:
+        combined += f"\n\n[注：该 PDF 共 {total_pages} 页，内容已截取前部供分析]"
+    return combined
 
 
 def _jpeg_has_end_marker(data: bytes | bytearray) -> bool:
@@ -455,6 +563,11 @@ class NativeClient:
             raise NativeAPIError(0, "timeout") from None
 
     async def _load_image_assets(self, message_id: str, *, quoted: bool, guard=None) -> list[dict]:
+        return await self._load_assets(message_id, "image", quoted=quoted, guard=guard)
+
+    async def _load_assets(
+        self, message_id: str, kind: str, *, quoted: bool, guard=None
+    ) -> list[dict]:
         _check_guard(guard)
         logger.debug("WeChat Native 查询图片资产：message=%s quoted=%s", message_id, quoted)
         try:
@@ -487,7 +600,7 @@ class NativeClient:
             ):
                 logger.warning("WeChat Native 图片资产身份不匹配：message=%s", message_id)
                 raise MediaError("unavailable")
-            if item.get("kind") != "image" or item.get("source") not in allowed_sources:
+            if item.get("kind") != kind or item.get("source") not in allowed_sources:
                 continue
             reason = item.get("reason")
             logger.debug(
@@ -904,6 +1017,110 @@ class NativeClient:
                 self.media_timeout,
             )
             raise MediaError("unavailable") from None
+
+    async def fetch_pdf(
+        self, message_id: str, *, max_bytes: int = MAX_PDF_BYTES, guard=None
+    ) -> tuple[bytes, str]:
+        """Download a validated PDF attachment as ``(bytes, filename)``; memory only."""
+        try:
+            async with asyncio.timeout(self.media_timeout):
+                return await self._fetch_pdf(message_id, max_bytes=max_bytes, guard=guard)
+        except TimeoutError:
+            logger.warning(
+                "WeChat Native PDF 读取超时：message=%s timeout_seconds=%s",
+                message_id,
+                self.media_timeout,
+            )
+            raise MediaError("unavailable", media_kind="pdf") from None
+        except MediaError as error:
+            if error.media_kind == "pdf":
+                raise
+            raise MediaError(error.reason, media_kind="pdf") from None
+
+    async def _load_pdf_assets(self, message_id: str, guard=None) -> list[dict]:
+        assets = await self._load_assets(message_id, "file", quoted=False, guard=guard)
+        pdfs = [
+            asset
+            for asset in assets
+            if _effective_variant(asset) in {"original", ""}
+            and is_pdf_filename(asset.get("filename"))
+        ]
+        if not pdfs:
+            # Native exposes the attachment's name only through its media asset.
+            raise MediaError("not_pdf", media_kind="pdf")
+        return pdfs
+
+    async def _fetch_pdf(self, message_id: str, *, max_bytes: int, guard=None) -> tuple[bytes, str]:
+        asset = (await self._load_pdf_assets(message_id, guard))[0]
+        state = asset.get("state")
+        size = asset.get("byteLength")
+        if not isinstance(size, int):
+            size = asset.get("advertisedByteLength")
+        if isinstance(size, int) and size > max_bytes:
+            raise MediaError("too_large", media_kind="pdf")
+        if state != "available":
+            if state in {"expired", "recalled", "unsupported", "unavailable", "failed"}:
+                reason = {
+                    "expired": "expired",
+                    "recalled": "recalled",
+                    "unsupported": "unsupported_format",
+                }.get(state)
+                raise MediaError(reason or "unavailable", media_kind="pdf")
+            job = asset.get("job")
+            job_id = (
+                asset.get("jobId")
+                or asset.get("activeJobId")
+                or (job.get("id") if isinstance(job, dict) else None)
+            )
+            initial = job if isinstance(job, dict) else None
+            if not isinstance(job_id, str) or not job_id:
+                _check_guard(guard)
+                try:
+                    initial = await self.transfer_media(message_id, "original")
+                except NativeAPIError as error:
+                    raise _map_media_code(
+                        error.code, status=error.status, media_kind="pdf"
+                    ) from None
+                job_id = initial.get("id")
+            _check_guard(guard)
+            await self._poll_media_job(
+                job_id, message_id=message_id, initial=initial, asset_id=asset["id"], guard=guard
+            )
+            refreshed = await self._load_pdf_assets(message_id, guard)
+            asset = next((a for a in refreshed if a.get("state") == "available"), None)
+            if asset is None:
+                raise MediaError("unavailable", media_kind="pdf")
+        byte_len = asset.get("byteLength")
+        if isinstance(byte_len, int) and byte_len <= 0:
+            raise MediaError("unavailable", media_kind="pdf")
+        adv_len = asset.get("advertisedByteLength")
+        if isinstance(byte_len, int) and byte_len > max_bytes:
+            raise MediaError("too_large", media_kind="pdf")
+        if isinstance(adv_len, int) and adv_len > max_bytes:
+            raise MediaError("too_large", media_kind="pdf")
+        _check_guard(guard)
+        try:
+            data, _ = await self.media_content(asset["id"], preview=False, max_bytes=max_bytes)
+        except NativeAPIError as error:
+            logger.warning(
+                "WeChat Native PDF 内容下载失败：asset=%s http_status=%s code=%s",
+                asset["id"],
+                error.status,
+                error.code,
+            )
+            raise _map_media_code(error.code, status=error.status, media_kind="pdf") from None
+        except MediaError as error:
+            raise MediaError(error.reason, media_kind="pdf") from None
+        _check_guard(guard)
+        if isinstance(byte_len, int) and len(data) != byte_len:
+            raise MediaError("unavailable", media_kind="pdf")
+        sha = asset.get("sha256")
+        if isinstance(sha, str) and sha and hashlib.sha256(data).hexdigest().lower() != sha.lower():
+            logger.warning("WeChat Native PDF 内容散列校验失败：asset=%s", asset["id"])
+            raise MediaError("unavailable", media_kind="pdf")
+        validate_pdf_bytes(data, max_bytes=max_bytes)
+        logger.debug("WeChat Native PDF 下载完成：asset=%s bytes=%s", asset["id"], len(data))
+        return data, asset["filename"].strip()
 
     async def send(self, send_id: str):
         return await self._request("GET", self.prefix + "/sends/" + quote(send_id, safe=""))

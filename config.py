@@ -8,11 +8,17 @@ PLUGIN_ID = "astrbot_plugin_wechat_native"
 ADAPTER_ID = "wechat_native"
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_PDF_BYTES = 20 * 1024 * 1024
+MAX_PDF_PAGES = 50
+MAX_PDF_TEXT_CHARS = 32000
 MEDIA_DOWNLOAD_TIMEOUT = 60
 MAX_CONCURRENT_MEDIA_TASKS = 3
 DEFAULT_IMAGE_PROMPT = "请描述这张图片的内容。"
+DEFAULT_PDF_PROMPT = "请阅读并总结这份 PDF 文件的主要内容。"
 RECENT_GROUP_IMAGE_SECONDS = 120
 MAX_RECENT_GROUP_IMAGES = 256
+RECENT_GROUP_PDF_SECONDS = 120
+MAX_RECENT_GROUP_PDFS = 256
 
 DEFAULT_CONFIG = {
     "id": "wechat_native",
@@ -59,8 +65,8 @@ CONFIG_METADATA = {
     "enable_private_reply": {"type": "bool", "description": "启用私聊回复"},
     "enable_media": {
         "type": "bool",
-        "description": "启用图片识别",
-        "hint": "支持私聊图片识别；群聊可引用图片并 @机器人，或发图后在2分钟内 @机器人解析。",
+        "description": "启用图片与 PDF 识别",
+        "hint": "支持私聊图片识别与 PDF 解析；群聊可引用图片或 PDF 并 @机器人，或发送后在2分钟内 @机器人解析。",
     },
     "allowed_users": {
         "type": "list",
