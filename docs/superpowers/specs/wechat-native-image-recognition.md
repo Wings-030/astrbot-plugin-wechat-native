@@ -5,7 +5,7 @@
 **AstrBot:** >=4.29.3,<5  
 **Language:** Python 3.12+  
 **Status:** Ready for Implementation  
-**Version:** 2.0 — Simplified
+**Version:** 2.1 — Includes approved v0.2.5 quote fallback and separate group mention
 
 ## 1. Objective
 
@@ -90,6 +90,16 @@ Do not automatically process:
 - Images embedded inside forwarded-chat bundles
 
 Keep existing behavior for these messages.
+
+### Scenario F — Group Image Followed by a Separate @Mention
+
+Record only the identifiers of incoming live images in allowed groups. A genuine @mention
+with an image-analysis prompt may select that sender's latest image from the same group
+within 120 seconds. An otherwise empty @mention may use the same image and default prompt.
+Keep at most 256 sources in memory, clear them on shutdown, and remove recalled images.
+Do not download images until requested. Ordinary text and summary commands retain their
+existing behavior. If an explicit image request has no matching image, ask the user to
+resend or quote it without submitting an incomplete request to the model.
 
 ## 3. Configuration
 
@@ -199,6 +209,13 @@ For direct images, use the incoming message's Native `id`.
 For quoted images, use the **current quote-reply message's Native `id`** to retrieve embedded quote media.
 
 Do not substitute `quote.serverId` for a Native message ID.
+
+Approved v0.2.5 exception: only if that lookup returns HTTP 409 `media_metadata_invalid`,
+resolve a unique previously recorded original Native ID using the same thread and quoted
+server ID. Validate account, thread, both message IDs, sender, image type and recall state
+before and after downloading, revalidate the triggering quote before event delivery, and
+recheck the original before replying. Other Native errors retain existing handling. The
+fallback and initial attempt share the existing media deadline and deduplication rules.
 
 Use the actual Native v1.3.3 message structure:
 
@@ -473,7 +490,6 @@ Do not implement the following in this release:
 - Voice or video understanding
 - Automatic OCR service integration
 - Sticker analysis
-- Group recent-image lookup
 - AI image generation or outbound image sending
 - Custom Vision API clients
 - Additional configuration settings

@@ -60,7 +60,7 @@ CONFIG_METADATA = {
     "enable_media": {
         "type": "bool",
         "description": "启用图片识别",
-        "hint": "支持私聊图片识别，以及群聊中引用图片并 @机器人进行分析。",
+        "hint": "支持私聊图片识别；群聊可引用图片并 @机器人，或发图后在2分钟内 @机器人解析。",
     },
     "allowed_users": {
         "type": "list",

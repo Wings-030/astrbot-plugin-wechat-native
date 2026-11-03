@@ -24,7 +24,8 @@
 | 私聊 | 直接发送图片 | `type == 3`，`body` 为空、`None` 或附带文本 | `enable_private_reply=True` 且 `enable_media=True` | 归类为 `"media"` 并立即下载分析。无文本时自动使用 `请描述这张图片的内容。` |
 | 私聊 | 引用图片并发送文字 | `type == 49, appMessageType == 57`，`quote.type == 3`，`body` 非空 | `enable_private_reply=True` 且 `enable_media=True` | 归类为 `"media"`，按用户提问结合被引用图片分析 |
 | 私聊 | 引用图片或直接发图 | 同上 | `enable_media=False` | 直接发图归类为 `"ignore"`。带文字的引用图片退化为普通 `"text"` 引用文本处理 |
-| 群聊 | 直接发送图片 | `type == 3` | 任意模式（含 `mention` 与 `all`） | 始终归类为 `"ignore"`，不下载图片且不回复 |
+| 群聊 | 直接发送图片 | `type == 3` | `enable_media=True`，群聊权限允许 | 不下载或回复，临时记录同群、同发送者最近图片的标识 |
+| 群聊 | 发图后另发 `@机器人 分析刚才的图片` | `type == 1` 且真实 @机器人 | `enable_media=True`，群聊权限允许 | 读取同群、同发送者最近 120 秒内的图片；也支持只 @机器人使用默认描述提示词 |
 | 群聊 | 引用图片但未 `@` 机器人 | `type == 49, appMessageType == 57`，`quote.type == 3`，未真实 `@` 机器人 | 任意模式（含 `mention` 与 `all`） | 归类为 `"ignore"`，不触发媒体下载 |
 | 群聊 | 引用图片并真正 `@` 机器人 | `type == 49, appMessageType == 57`，`quote.type == 3`，`mentions.state == "known"` 且 `mentions.self is True` | `group_reply_mode` 为 `mention` 或 `all`，且 `enable_media=True` | 归类为 `"media"`。剥离前导 `@昵称\u2005` 后若文本为空，自动使用 `请描述这张图片的内容。` |
 | 群聊 | 引用图片并 `@` 机器人发送摘要命令 | 同上，且剥离 `@` 后的文本为 `总结群聊` 或 `群聊摘要` | `group_reply_mode != "disabled"` | 优先归类为 `"text"` 执行群聊摘要，不下载被引用图片 |
@@ -43,13 +44,17 @@
 
 [`NativeClient.fetch_image`](../native_client.py) 在 `asyncio.timeout(self.media_timeout)`（60 秒）预算内执行以下步骤：
 
-1. **查询关联媒体资产**。调用 `GET /v1/accounts/{accountId}/messages/{messageId}/media`（[`NativeClient.media_assets`](../native_client.py)）。对于引用图片（`quoted=True`），始终使用当前引用回复消息自身的 Native `id`（`raw["id"]`），绝不使用 `quote["serverId"]`，并过滤 `kind == "image"` 且 `source` 匹配的资产。
+1. **查询关联媒体资产**。调用 `GET /v1/accounts/{accountId}/messages/{messageId}/media`（[`NativeClient.media_assets`](../native_client.py)）。对于引用图片（`quoted=True`），优先使用当前引用回复消息自身的 Native `id`（`raw["id"]`），绝不将 `quote["serverId"]` 当作 Native ID，并过滤 `kind == "image"` 且 `source` 匹配的资产。
 2. **优先使用已就绪的高清资产**。若存在 `state == "available"` 且有效变体（`actualVariant` 或 `variant`）为 `"original"` 或 `"standard"` 的资产，按 `original -> standard` 顺序直接下载并校验。
 3. **按需发起单次高清传输**。若当前没有已就绪的 `original` 或 `standard` 资产（例如仅缓存了 `thumbnail` 或高清变体处于未下载状态），最多尝试一次高清传输：
    * 若候选资产已携带在途 `jobId`、`activeJobId` 或 `job.id`，直接复用该任务并调用 `GET /v1/accounts/{accountId}/jobs/{jobId}`（[`NativeClient.job`](../native_client.py)）轮询。
    * 否则调用 `POST /v1/accounts/{accountId}/messages/{messageId}/media-transfers`（[`NativeClient.transfer_media`](../native_client.py)）请求下载并轮询至完成（`state` 为 `"available"`、`"completed"` 或 `"succeeded"`），随后重新拉取资产列表下载高清图片。
 4. **回退缩略图**。若高清传输不可用或失败（非撤回且非权限缺失），自动回退下载已处于 `state == "available"` 的 `thumbnail` 资产。
 5. **处理 `WXGF` 格式**。当资产 `contentType == "image/x-wxgf"` 或 `format == "wxgf"` 时，检查 `asset["preview"]` 元数据并调用 `GET /v1/accounts/{accountId}/media/{assetId}/content?representation=preview` 获取 Native 转码生成的 JPEG 或 PNG 预览图，绝不向 AstrBot 传递原始 `WXGF` 字节。
+
+**引用原图回退（v0.2.5）**：仅在引用资产查询返回 `409 media_metadata_invalid` 时，按当前聊天和 `quote.serverId` 从已有 `StateStore` 查找唯一的原图 Native ID。下载前后核对账号、聊天、消息 ID、服务端 ID、发送者、图片类型及撤回状态，下载后重新检查当前引用消息，发送模型回复前再次检查原图。未知原图、匹配不唯一、身份变化以及其他 Native 错误均不采用该回退；整个媒体操作共用 60 秒预算。
+
+**先发图再 @（v0.2.5）**：只在内存中保存允许群的实时图片标识，按群和发送者隔离，保留 120 秒、最多 256 个来源。真正 @机器人发送包含“图片”“照片”“截图”“看图”“识图”“这张图”等内容的请求时，下载该成员最近一张图片；只 @机器人也可使用有效的最近图片。普通聊天和群摘要仍按原规则处理。没有匹配图片时明确提示重新发送或引用，不将缺图请求交给模型。撤回会移除来源并停止相关任务；停止或重启清空最近图片记录。
 
 ```mermaid
 sequenceDiagram
