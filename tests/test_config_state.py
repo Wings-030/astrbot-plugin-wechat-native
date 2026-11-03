@@ -137,6 +137,20 @@ def test_outbox_retains_key_without_content_or_token(tmp_path):
     state.close()
 
 
+def test_original_lookup_requires_unique_message_in_same_chat(tmp_path):
+    state = module("state").StateStore(tmp_path / "state.sqlite3")
+    try:
+        state.accept("1", "original", "peer", "899", "ignored")
+        state.accept("2", "foreign-original", "another-chat", "899", "ignored")
+        assert state.find_message_id("peer", "899") == "original"
+        assert state.find_message_id("unknown-chat", "899") is None
+        assert state.find_message_id("peer", "unknown-server") is None
+        state.accept("3", "duplicate", "peer", "899", "ignored")
+        assert state.find_message_id("peer", "899") is None
+    finally:
+        state.close()
+
+
 def test_server_replacement_never_reuses_old_cursor(tmp_path):
     state_module = module("state")
     state = state_module.StateStore(tmp_path / "state.sqlite3")

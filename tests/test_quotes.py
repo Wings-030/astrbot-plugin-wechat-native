@@ -358,7 +358,8 @@ async def test_private_quoted_image_resolves_via_current_message_id(serve, tmp_p
 
 
 async def make_quote_fallback_adapter(
-    serve, tmp_path, *, thread="peer", status=409, code="media_metadata_invalid"
+    serve, tmp_path, *, thread="peer", status=409, code="media_metadata_invalid",
+    original_media_error=None, download_hook=None,
 ):
     original = message(id="original-native-id", serverId="899", senderId="author", type=3,
                        threadId=thread, body=None)
@@ -378,9 +379,14 @@ async def make_quote_fallback_adapter(
             if req.path.endswith("/messages/original-native-id"):
                 return web.json_response(original)
             if req.path.endswith("/messages/original-native-id/media"):
+                if original_media_error:
+                    error_status, error_code = original_media_error
+                    return web.json_response({"error": {"code": error_code}}, status=error_status)
                 return web.json_response({"items": [media_asset(
                     "asset-1", accountId="a", message_id="original-native-id"
                 )]})
+            if req.path.endswith("/media/asset-1/content") and download_hook:
+                await download_hook(original, msg)
             return await default_handler(req)
         return await serve(handler)
 
@@ -500,6 +506,72 @@ async def test_quoted_image_fallback_does_not_mask_other_native_errors(serve, tm
         assert len(sent) == 1
         assert not any(path.endswith("/original-native-id") for path in requests)
     finally:
+        await adapter.terminate()
+
+
+async def test_quoted_image_fallback_media_recall_keeps_trigger_unrecalled(serve, tmp_path):
+    import asyncio
+
+    adapter, queue, msg, _, sent, _ = await make_quote_fallback_adapter(
+        serve, tmp_path, original_media_error=(410, "message_recalled")
+    )
+    try:
+        await adapter.process_native_event(native_event(msg, "2"))
+        await asyncio.gather(*list(adapter._media_tasks))
+        assert queue.empty()
+        assert sent == []
+        assert adapter.state.message_status(msg["id"]) == "no_reply"
+    finally:
+        await adapter.terminate()
+
+
+@pytest.mark.parametrize("changed_source", ["original", "quote", "trigger"])
+async def test_quoted_image_fallback_rechecks_sources_after_download(serve, tmp_path, changed_source):
+    import asyncio
+
+    async def change_source(original, msg):
+        if changed_source == "original":
+            original["recall"] = {"observedAt": "now"}
+        elif changed_source == "quote":
+            msg["quote"]["serverId"] = "another-image"
+        else:
+            msg["recall"] = {"observedAt": "now"}
+
+    adapter, queue, msg, _, sent, _ = await make_quote_fallback_adapter(
+        serve, tmp_path, download_hook=change_source
+    )
+    try:
+        await adapter.process_native_event(native_event(msg, "2"))
+        await asyncio.gather(*list(adapter._media_tasks))
+        assert queue.empty()
+        assert sent == []
+        assert adapter.state.message_status(msg["id"]) == (
+            "recalled" if changed_source == "trigger" else "no_reply"
+        )
+    finally:
+        await adapter.terminate()
+
+
+async def test_quoted_image_fallback_obeys_media_deadline(serve, tmp_path):
+    import asyncio
+
+    release = asyncio.Event()
+
+    async def slow_download(original, msg):
+        await release.wait()
+
+    adapter, queue, msg, _, sent, _ = await make_quote_fallback_adapter(
+        serve, tmp_path, download_hook=slow_download
+    )
+    adapter.client.media_timeout = 0.05
+    try:
+        await adapter.process_native_event(native_event(msg, "2"))
+        await asyncio.wait_for(asyncio.gather(*list(adapter._media_tasks)), 0.5)
+        assert queue.empty()
+        assert len(sent) == 1
+        assert adapter.state.message_status(msg["id"]) == "replied"
+    finally:
+        release.set()
         await adapter.terminate()
 
 
