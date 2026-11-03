@@ -68,6 +68,7 @@ MEDIA_ERROR_MESSAGES = {
     "missing_scope": "图片读取功能未正确配置，请联系管理员。",
     "unsupported_format": "暂不支持这种图片格式。",
     "recalled": "",
+    "recent_unavailable": "未找到你在本群最近2分钟发送的图片，请重新发送或引用图片。",
 }
 
 _VARIANT_RANK = {"original": 0, "standard": 1, "thumbnail": 2}

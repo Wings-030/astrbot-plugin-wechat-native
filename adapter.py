@@ -7,6 +7,7 @@ import re
 import time
 import uuid
 import weakref
+from collections import OrderedDict
 from pathlib import Path
 
 from astrbot.api import logger
@@ -20,7 +21,9 @@ from .config import (
     CONFIG_METADATA,
     DEFAULT_CONFIG,
     MAX_CONCURRENT_MEDIA_TASKS,
+    MAX_RECENT_GROUP_IMAGES,
     PLUGIN_ID,
+    RECENT_GROUP_IMAGE_SECONDS,
     NativeConfig,
 )
 from .event import (
@@ -80,6 +83,7 @@ class WeChatNativeAdapter(Platform):
         self._send_tasks = set()
         self._media_tasks = set()
         self._media_semaphore = asyncio.Semaphore(MAX_CONCURRENT_MEDIA_TASKS)
+        self._recent_group_images = OrderedDict()
         self._events = weakref.WeakValueDictionary()
         self._send_lock = asyncio.Lock()
         self._terminate_lock = asyncio.Lock()
@@ -209,10 +213,66 @@ class WeChatNativeAdapter(Platform):
             return False
         return cfg.enable_group_summary
 
+    def _remember_group_image(self, raw: dict, origin: str) -> None:
+        cfg = self.native_config
+        thread, sender = raw["threadId"], raw.get("senderId")
+        if (
+            not cfg.enable_media
+            or cfg.group_reply_mode == "disabled"
+            or not thread.endswith("@chatroom")
+            or origin != "live"
+            or raw.get("type") != 3
+            or raw.get("direction") != "incoming"
+            or raw.get("recall") is not None
+            or not isinstance(sender, str)
+            or not sender
+            or sender == self.bot_self_id
+            or (cfg.allowed_groups and thread not in cfg.allowed_groups)
+            or not isinstance(raw.get("serverId"), str)
+            or not raw["serverId"]
+        ):
+            return
+        stamp = message_timestamp(raw)
+        now = time.time()
+        if stamp is None or not -60 <= now - stamp <= RECENT_GROUP_IMAGE_SECONDS:
+            return
+        key = (thread, sender)
+        previous = self._recent_group_images.get(key)
+        if previous and previous["timestamp"] > stamp:
+            return
+        self._recent_group_images[key] = {
+            "serverId": raw["serverId"],
+            "senderId": sender,
+            "timestamp": min(stamp, now),
+        }
+        self._recent_group_images.move_to_end(key)
+        while len(self._recent_group_images) > MAX_RECENT_GROUP_IMAGES:
+            self._recent_group_images.popitem(last=False)
+
+    def _recent_image_request(self, raw: dict, prompt: str) -> tuple[bool, dict | None]:
+        mentions = raw.get("mentions")
+        if (
+            not self.native_config.enable_media
+            or raw.get("type") != 1
+            or not raw["threadId"].endswith("@chatroom")
+            or not isinstance(mentions, dict)
+            or mentions.get("state") != "known"
+            or mentions.get("self") is not True
+            or is_summary_command(prompt)
+        ):
+            return False, None
+        key = (raw["threadId"], raw["senderId"])
+        source = self._recent_group_images.get(key)
+        if source and time.time() - source["timestamp"] > RECENT_GROUP_IMAGE_SECONDS:
+            self._recent_group_images.pop(key)
+            source = None
+        requested = bool(re.search(r"图片|照片|截图|看图|识图|这张图|那张图|刚才.{0,6}图", prompt))
+        return requested or (not prompt.strip() and source is not None), source
+
     async def _check_quote_original(
         self, raw: dict, wrapped: WeChatNativeEvent, original_id: str
     ) -> None:
-        quote = raw["quote"]
+        quote = wrapped.get_extra("wechat_native_recent_image") or raw["quote"]
         original = await self.client.message(original_id)
         if (
             original.get("id") != original_id
@@ -231,7 +291,8 @@ class WeChatNativeAdapter(Platform):
             raise MediaError("recalled")
 
     async def _fetch_quote_original(self, raw: dict, wrapped: WeChatNativeEvent, guard) -> bytes:
-        quote = raw["quote"]
+        recent = wrapped.get_extra("wechat_native_recent_image")
+        quote = recent or raw["quote"]
         if not all(
             isinstance(quote.get(key), str) and quote[key] for key in ("serverId", "senderId")
         ):
@@ -243,11 +304,12 @@ class WeChatNativeAdapter(Platform):
             guard()
             await self._check_quote_original(raw, wrapped, original_id)
             guard()
-            logger.warning(
-                "WeChat Native 引用媒体元数据无效，回退同聊天原图：message=%s original=%s",
-                raw["id"],
-                original_id,
-            )
+            if not recent:
+                logger.warning(
+                    "WeChat Native 引用媒体元数据无效，回退同聊天原图：message=%s original=%s",
+                    raw["id"],
+                    original_id,
+                )
             image_bytes = await self.client.fetch_image(original_id, guard=guard)
             guard()
             await self._check_quote_original(raw, wrapped, original_id)
@@ -271,7 +333,7 @@ class WeChatNativeAdapter(Platform):
         if current.get("recall") is not None:
             raise MediaError("recalled")
         current_quote = current.get("quote")
-        if (
+        if not recent and (
             current.get("type") != 49
             or current.get("appMessageType") != 57
             or not isinstance(current_quote, dict)
@@ -281,6 +343,9 @@ class WeChatNativeAdapter(Platform):
             or current_quote.get("state") != "embedded"
             or current_quote.get("embeddedImage") is not True
         ):
+            wrapped.set_extra("wechat_native_quote_invalidated", True)
+            raise MediaError("recalled")
+        if recent and (current.get("type") != 1 or current.get("senderId") != raw["senderId"]):
             wrapped.set_extra("wechat_native_quote_invalidated", True)
             raise MediaError("recalled")
         wrapped.set_extra("wechat_native_quote_original_id", original_id)
@@ -308,6 +373,9 @@ class WeChatNativeAdapter(Platform):
                 logger.info(
                     "WeChat Native 图片处理开始：message=%s quoted=%s", message_id, is_quote
                 )
+                recent_request = wrapped.get_extra("wechat_native_recent_image_request")
+                if recent_request and not wrapped.get_extra("wechat_native_recent_image"):
+                    raise MediaError("recent_unavailable")
                 if is_quote:
                     quote = raw.get("quote")
                     if not isinstance(quote, dict) or quote.get("type") != 3:
@@ -335,9 +403,12 @@ class WeChatNativeAdapter(Platform):
                 try:
                     async with asyncio.timeout(self.client.media_timeout):
                         try:
-                            image_bytes = await self.client.fetch_image(
-                                message_id, quoted=is_quote, guard=guard
-                            )
+                            if recent_request:
+                                image_bytes = await self._fetch_quote_original(raw, wrapped, guard)
+                            else:
+                                image_bytes = await self.client.fetch_image(
+                                    message_id, quoted=is_quote, guard=guard
+                                )
                         except QuotedMediaMetadataError:
                             image_bytes = await self._fetch_quote_original(raw, wrapped, guard)
                 except TimeoutError:
@@ -353,6 +424,11 @@ class WeChatNativeAdapter(Platform):
                 original_id = wrapped.get_extra("wechat_native_quote_original_id")
                 if original_id:
                     event.set_extra("wechat_native_quote_original_id", original_id)
+                if recent_request:
+                    event.set_extra(
+                        "wechat_native_recent_image",
+                        wrapped.get_extra("wechat_native_recent_image"),
+                    )
                 try:
                     self.commit_event(event)
                 except Exception:
@@ -475,8 +551,12 @@ class WeChatNativeAdapter(Platform):
                 raise ValueError("invalid_recall_identity")
             self.state.recall(thread, server_id, message_id)
             self.summary_cache.recall(thread, server_id)
+            for key, source in list(self._recent_group_images.items()):
+                if key[0] == thread and source["serverId"] == server_id:
+                    self._recent_group_images.pop(key)
             for active in list(self._events.values()):
                 raw = active.message_obj.raw_message
+                reference = active.get_extra("wechat_native_recent_image") or raw.get("quote")
                 if raw["threadId"] == thread and (raw.get("serverId") == server_id):
                     active.stop_event()
                     media_task = active.get_extra("wechat_native_media_task")
@@ -484,8 +564,8 @@ class WeChatNativeAdapter(Platform):
                         media_task.cancel()
                 elif (
                     raw["threadId"] == thread
-                    and isinstance(raw.get("quote"), dict)
-                    and raw["quote"].get("serverId") == server_id
+                    and isinstance(reference, dict)
+                    and reference.get("serverId") == server_id
                 ):
                     active.set_extra("wechat_native_quote_invalidated", True)
                     active.stop_event()
@@ -547,6 +627,15 @@ class WeChatNativeAdapter(Platform):
         fresh = self.state.accept(
             cursor, message_id, thread, raw.get("serverId"), "queued" if eligible else "ignored"
         )
+        recent_request, recent_source = False, None
+        if fresh:
+            self._remember_group_image(raw, origin)
+            if kind == "text":
+                recent_request, recent_source = self._recent_image_request(
+                    raw, converted.message_str
+                )
+                if recent_request:
+                    kind = "media"
         if not fresh:
             logger.debug(
                 "WeChat Native 消息去重跳过：message=%s status=%s",
@@ -567,6 +656,9 @@ class WeChatNativeAdapter(Platform):
             logger.debug("WeChat Native 文本已交付 AstrBot：message=%s", message_id)
         elif fresh and kind == "media":
             wrapped = WeChatNativeEvent(converted, self)
+            if recent_request:
+                wrapped.set_extra("wechat_native_recent_image_request", True)
+                wrapped.set_extra("wechat_native_recent_image", recent_source)
             self._events[message_id] = wrapped
             task = asyncio.create_task(self._process_media_message(raw, wrapped))
             wrapped.set_extra("wechat_native_media_task", task)
@@ -821,6 +913,7 @@ class WeChatNativeAdapter(Platform):
         for event in list(self._events.values()):
             event.stop_event()
         self.summary_cache.clear()
+        self._recent_group_images.clear()
         await self.client.close()
         self.state.close()
         self._state_closed = True
