@@ -6,7 +6,7 @@ from test_adapter import (
     native_event,
     no_telemetry,  # noqa: F401
 )
-from test_native_client import client, receipt
+from test_native_client import VALID_JPEG, client, media_asset, receipt
 
 
 @pytest.mark.parametrize("thread", ["peer", "room@chatroom"])
@@ -353,6 +353,152 @@ async def test_private_quoted_image_resolves_via_current_message_id(serve, tmp_p
         assert components[0].message_str == "[图片]"
         assert "不支持" not in components[0].message_str
         assert not any(isinstance(c, Image) for c in components[0].chain)
+    finally:
+        await adapter.terminate()
+
+
+async def make_quote_fallback_adapter(
+    serve, tmp_path, *, thread="peer", status=409, code="media_metadata_invalid"
+):
+    original = message(id="original-native-id", serverId="899", senderId="author", type=3,
+                       threadId=thread, body=None)
+    msg = message(
+        id="quote-msg", threadId=thread, type=49, appMessageType=57, body="帮我分析这张图",
+        mentions={"state": "known", "self": True},
+        quote={"serverId": "899", "senderId": "author", "type": 3,
+               "state": "embedded", "embeddedImage": True},
+    )
+    requests = []
+
+    async def custom_serve(default_handler):
+        async def handler(req):
+            requests.append(req.path)
+            if req.path.endswith("/messages/quote-msg/media"):
+                return web.json_response({"error": {"code": code}}, status=status)
+            if req.path.endswith("/messages/original-native-id"):
+                return web.json_response(original)
+            if req.path.endswith("/messages/original-native-id/media"):
+                return web.json_response({"items": [media_asset(
+                    "asset-1", accountId="a", message_id="original-native-id"
+                )]})
+            return await default_handler(req)
+        return await serve(handler)
+
+    adapter, queue, _, sent = await make_adapter(custom_serve, tmp_path, msg)
+    adapter.state.accept("1", original["id"], thread, "899", "replied")
+    return adapter, queue, msg, original, sent, requests
+
+
+@pytest.mark.parametrize("thread", ["peer", "room@chatroom"])
+async def test_quoted_image_metadata_error_uses_verified_original(serve, tmp_path, thread):
+    import asyncio
+    import base64
+    from astrbot.api.message_components import Image, Reply
+
+    adapter, queue, msg, _, sent, requests = await make_quote_fallback_adapter(
+        serve, tmp_path, thread=thread
+    )
+    try:
+        await adapter.process_native_event(native_event(msg, "2"))
+        await asyncio.gather(*list(adapter._media_tasks))
+        assert queue.qsize() == 1
+        event = queue.get_nowait()
+        assert event.message_str == "帮我分析这张图"
+        images = [part for part in event.get_messages() if isinstance(part, Image)]
+        assert len(images) == 1
+        assert images[0].file == "base64://" + base64.b64encode(VALID_JPEG).decode()
+        reply = next(part for part in event.get_messages() if isinstance(part, Reply))
+        assert not any(isinstance(part, Image) for part in reply.chain)
+        media_paths = [path for path in requests if path.endswith("/media")]
+        assert media_paths == ["/v1/accounts/a/messages/quote-msg/media",
+                               "/v1/accounts/a/messages/original-native-id/media"]
+        assert sent == []
+        await adapter.process_native_event(native_event(msg, "3"))
+        assert queue.empty()
+        assert [path for path in requests if path.endswith("/media")] == media_paths
+    finally:
+        await adapter.terminate()
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [{"accountId": "other"}, {"threadId": "other-peer"}, {"id": "other-id"},
+     {"serverId": "other-server"}, {"senderId": "other-author"}, {"type": 1}],
+)
+async def test_quoted_image_fallback_rejects_original_identity_changes(serve, tmp_path, changes):
+    import asyncio
+    adapter, queue, msg, original, sent, requests = await make_quote_fallback_adapter(serve, tmp_path)
+    original.update(changes)
+    try:
+        await adapter.process_native_event(native_event(msg, "2"))
+        await asyncio.gather(*list(adapter._media_tasks))
+        assert queue.empty()
+        assert len(sent) == 1
+        assert not any(path.endswith("/original-native-id/media") for path in requests)
+    finally:
+        await adapter.terminate()
+
+
+@pytest.mark.parametrize("known_elsewhere", [False, True])
+async def test_quoted_image_fallback_requires_original_in_same_chat(serve, tmp_path, known_elsewhere):
+    import asyncio
+    adapter, queue, msg, _, sent, requests = await make_quote_fallback_adapter(serve, tmp_path)
+    msg["quote"]["serverId"] = "unknown-server"
+    if known_elsewhere:
+        adapter.state.accept("2", "foreign-original", "another-chat", "unknown-server", "ignored")
+    try:
+        await adapter.process_native_event(native_event(msg, "3"))
+        await asyncio.gather(*list(adapter._media_tasks))
+        assert queue.empty()
+        assert len(sent) == 1
+        assert not any(path.endswith("/original-native-id") for path in requests)
+        assert not any("unknown-server" in path for path in requests)
+    finally:
+        await adapter.terminate()
+
+
+@pytest.mark.parametrize("after_dispatch", [False, True])
+async def test_quoted_image_fallback_original_recall_suppresses_reply(
+    serve, tmp_path, after_dispatch
+):
+    import asyncio
+    from astrbot.api.event import MessageChain
+    from astrbot.api.message_components import Plain
+
+    adapter, queue, msg, original, sent, _ = await make_quote_fallback_adapter(serve, tmp_path)
+    if not after_dispatch:
+        original["recall"] = {"observedAt": "now"}
+    try:
+        await adapter.process_native_event(native_event(msg, "2"))
+        await asyncio.gather(*list(adapter._media_tasks))
+        if after_dispatch:
+            assert queue.qsize() == 1
+            event = queue.get_nowait()
+            original["recall"] = {"observedAt": "now"}
+            await event.send(MessageChain([Plain("根据原图生成的回答")]))
+            assert event.is_stopped()
+        assert queue.empty()
+        assert sent == []
+        assert adapter.state.message_status(msg["id"]) == "no_reply"
+    finally:
+        await adapter.terminate()
+
+
+@pytest.mark.parametrize(
+    "status,code", [(403, "insufficient_scope"), (404, "media_not_cached"),
+                    (500, "media_metadata_invalid"), (409, "media_integrity_failed")],
+)
+async def test_quoted_image_fallback_does_not_mask_other_native_errors(serve, tmp_path, status, code):
+    import asyncio
+    adapter, queue, msg, _, sent, requests = await make_quote_fallback_adapter(
+        serve, tmp_path, status=status, code=code
+    )
+    try:
+        await adapter.process_native_event(native_event(msg, "2"))
+        await asyncio.gather(*list(adapter._media_tasks))
+        assert queue.empty()
+        assert len(sent) == 1
+        assert not any(path.endswith("/original-native-id") for path in requests)
     finally:
         await adapter.terminate()
 

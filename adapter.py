@@ -35,6 +35,7 @@ from .native_client import (
     MediaError,
     NativeAPIError,
     NativeClient,
+    QuotedMediaMetadataError,
     SendError,
 )
 from .state import StateStore, cursor_number
@@ -210,6 +211,68 @@ class WeChatNativeAdapter(Platform):
             return False
         return cfg.enable_group_summary
 
+    async def _check_quote_original(
+        self, raw: dict, wrapped: WeChatNativeEvent, original_id: str
+    ) -> None:
+        quote = raw["quote"]
+        original = await self.client.message(original_id)
+        if (
+            original.get("id") != original_id
+            or original.get("accountId") != self.native_config.account_id
+            or original.get("threadId") != raw["threadId"]
+            or original.get("serverId") != quote["serverId"]
+            or original.get("senderId") != quote["senderId"]
+            or original.get("type") != 3
+        ):
+            raise MediaError("unavailable")
+        if original.get("recall") is not None or self.state.message_status(original_id) == "recalled":
+            wrapped.set_extra("wechat_native_quote_invalidated", True)
+            raise MediaError("recalled")
+
+    async def _fetch_quote_original(self, raw: dict, wrapped: WeChatNativeEvent, guard) -> bytes:
+        quote = raw["quote"]
+        if not all(isinstance(quote.get(key), str) and quote[key] for key in ("serverId", "senderId")):
+            raise MediaError("unavailable")
+        original_id = self.state.find_message_id(raw["threadId"], quote["serverId"])
+        if original_id is None:
+            raise MediaError("unavailable")
+        try:
+            guard()
+            await self._check_quote_original(raw, wrapped, original_id)
+            guard()
+            logger.warning(
+                "WeChat Native 引用媒体元数据无效，回退同聊天原图：message=%s original=%s",
+                raw["id"], original_id,
+            )
+            image_bytes = await self.client.fetch_image(original_id, guard=guard)
+            guard()
+            await self._check_quote_original(raw, wrapped, original_id)
+            current = await self.client.message(raw["id"])
+            guard()
+        except NativeAPIError as error:
+            if error.status == 410 or error.code == "message_recalled":
+                wrapped.set_extra("wechat_native_quote_invalidated", True)
+                raise MediaError("recalled") from None
+            raise MediaError(
+                "missing_scope" if error.status in {401, 403} else "unavailable"
+            ) from None
+        if any(current.get(key) != raw.get(key) for key in ("id", "accountId", "threadId", "serverId")):
+            raise MediaError("unavailable")
+        if current.get("recall") is not None:
+            raise MediaError("recalled")
+        current_quote = current.get("quote")
+        if (
+            current.get("type") != 49 or current.get("appMessageType") != 57
+            or not isinstance(current_quote, dict)
+            or any(current_quote.get(key) != quote.get(key) for key in ("serverId", "senderId", "type"))
+            or current_quote.get("state") != "embedded"
+            or current_quote.get("embeddedImage") is not True
+        ):
+            wrapped.set_extra("wechat_native_quote_invalidated", True)
+            raise MediaError("recalled")
+        wrapped.set_extra("wechat_native_quote_original_id", original_id)
+        return image_bytes
+
     async def _process_media_message(self, raw: dict, wrapped: WeChatNativeEvent) -> None:
         task = asyncio.current_task()
         message_id = raw["id"]
@@ -256,9 +319,16 @@ class WeChatNativeAdapter(Platform):
                         raise MediaError("unsupported_format")
                     if state != "embedded" or quote.get("embeddedImage") is not True:
                         raise MediaError("expired")
-                image_bytes = await self.client.fetch_image(
-                    message_id, quoted=is_quote, guard=guard
-                )
+                try:
+                    async with asyncio.timeout(self.client.media_timeout):
+                        try:
+                            image_bytes = await self.client.fetch_image(
+                                message_id, quoted=is_quote, guard=guard
+                            )
+                        except QuotedMediaMetadataError:
+                            image_bytes = await self._fetch_quote_original(raw, wrapped, guard)
+                except TimeoutError:
+                    raise MediaError("unavailable") from None
                 guard()
                 logger.debug(
                     "WeChat Native 图片下载完成：message=%s bytes=%s", message_id, len(image_bytes)
@@ -267,6 +337,9 @@ class WeChatNativeAdapter(Platform):
                     raw, self.native_config, self.bot_self_id, image_bytes=image_bytes
                 )
                 event = WeChatNativeEvent(enriched, self)
+                original_id = wrapped.get_extra("wechat_native_quote_original_id")
+                if original_id:
+                    event.set_extra("wechat_native_quote_original_id", original_id)
                 try:
                     self.commit_event(event)
                 except Exception:
@@ -623,6 +696,16 @@ class WeChatNativeAdapter(Platform):
                         if event:
                             event.stop_event()
                         return False
+                    original_id = event.get_extra("wechat_native_quote_original_id") if event else None
+                    if original_id:
+                        try:
+                            await self._check_quote_original(source, event, original_id)
+                        except (MediaError, NativeAPIError):
+                            event.set_extra("wechat_native_quote_invalidated", True)
+                            event.stop_event()
+                            if self.state.message_status(message_id) == "queued":
+                                self.state.mark_message(message_id, "no_reply")
+                            return False
                 quote = None
                 if reply_id is not None:
                     target = (

@@ -95,6 +95,10 @@ class MediaError(Exception):
         super().__init__(f"Native media error: {self.reason}")
 
 
+class QuotedMediaMetadataError(MediaError):
+    """Native rejected the embedded quote's download metadata."""
+
+
 class SendError(Exception):
     """A retained send requires inspection. Never automatically create a new key."""
 
@@ -455,6 +459,8 @@ class NativeClient:
         try:
             body = await self.media_assets(message_id)
         except NativeAPIError as error:
+            if quoted and error.status == 409 and error.code == "media_metadata_invalid":
+                raise QuotedMediaMetadataError() from None
             logger.warning(
                 "WeChat Native 图片资产查询失败：message=%s http_status=%s code=%s",
                 message_id,
