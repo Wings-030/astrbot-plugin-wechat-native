@@ -83,7 +83,7 @@ sequenceDiagram
 [`validate_image_bytes`](../native_client.py) 在字节流下载完成后（结合 `byteLength` 与 `sha256` 校验）执行严格的多模态安全检查：
 
 * 拒绝空字节流、超过 `MAX_IMAGE_BYTES` 的载荷、以 `wxgf` 开头的未转码内容以及以 `<` 开头的 HTML/XML 错误页。
-* **JPEG** 要求以 `\xff\xd8\xff` 开头、长度不少于 12 字节且以 `\xff\xd9` 结尾。
+* **JPEG** 要求以 `\xff\xd8\xff` 开头，按段长度和扫描数据定位真实的 `\xff\xd9` 结束标记；与 Native 一致，允许结束标记后的附加数据，并保留完整源字节。拒绝截断、段长度越界或仅在元数据内出现结束标记的内容，支持渐进式 JPEG 的多次扫描。
 * **PNG** 要求以 `\x89PNG\r\n\x1a\n` 开头、包含合法正整数宽高的 `IHDR` 块且以完整 `IEND` 块结尾。
 * **GIF** 要求以 `GIF87a` 或 `GIF89a` 开头、逻辑屏幕宽高大于 0 且以 `;`（`0x3b`）结尾。
 * **WebP** 要求符合 `RIFF....WEBP` 容器头、包含 `VP8 `、`VP8L` 或 `VP8X` 块且 `RIFF` 声明长度与实际字节数一致。

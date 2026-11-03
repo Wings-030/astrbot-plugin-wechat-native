@@ -1,12 +1,15 @@
 import asyncio
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 from aiohttp import web
 from conftest import module
 
-VALID_JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9"
+FIXTURES = Path(__file__).with_name("fixtures")
+VALID_JPEG = (FIXTURES / "baseline.jpg").read_bytes()
+PROGRESSIVE_JPEG = (FIXTURES / "progressive.jpg").read_bytes()
 VALID_PNG = (
     b"\x89PNG\r\n\x1a\n"
     b"\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde"
@@ -458,6 +461,45 @@ def test_validate_image_bytes_accepts_supported_formats(payload, expected_mime):
     assert api.validate_image_bytes(payload) == expected_mime
 
 
+@pytest.mark.parametrize("jpeg", [VALID_JPEG, PROGRESSIVE_JPEG], ids=["baseline", "progressive"])
+@pytest.mark.parametrize(
+    "trailer",
+    [b"", b"\x00" * 24, b"synthetic-wechat-photo-trailer"],
+    ids=["none", "padding", "native-trailer"],
+)
+def test_validate_jpeg_allows_data_after_real_end_marker(jpeg, trailer):
+    api = module("native_client")
+    assert api.validate_image_bytes(jpeg + trailer) == "image/jpeg"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        VALID_JPEG[:-2],
+        PROGRESSIVE_JPEG[:-2],
+        b"\xff\xd8\xff\xfe\x00\x06\x11\xff\xd9\x22" + VALID_JPEG[2:-2],
+        b"\xff\xd8\xff\xfe\xff\xff" + VALID_JPEG[2:],
+        b"\xff\xd8\xff\xfe\x00\x01\xff\xd9",
+        b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9",
+        b"\xff\xd8\xff\xda\x00\x02\x07\xff\x00\xd9\xff\xd0\x09\xff",
+    ],
+    ids=[
+        "baseline-truncated",
+        "progressive-truncated",
+        "eoi-in-metadata",
+        "segment-overrun",
+        "invalid-segment-length",
+        "missing-scan",
+        "stuffed-byte-and-restart",
+    ],
+)
+def test_validate_jpeg_rejects_truncation_and_false_end_markers(payload):
+    api = module("native_client")
+    with pytest.raises(api.MediaError) as error:
+        api.validate_image_bytes(payload)
+    assert error.value.reason == "unavailable"
+
+
 @pytest.mark.parametrize(
     "payload,max_bytes,reason",
     [
@@ -534,6 +576,35 @@ async def test_fetch_image_transfers_original_when_only_thumbnail_cached(serve):
     assert sum(m == "POST" and p.endswith("/media-transfers") for m, p, _ in calls) == 1
     assert any(p.endswith("/media/orig-1/content") for _, p, _ in calls)
     assert not any(p.endswith("/media/thumb-1/content") for _, p, _ in calls)
+
+
+async def test_fetch_image_keeps_standard_jpeg_with_trailer_instead_of_thumbnail(serve):
+    standard = VALID_JPEG + b"synthetic-wechat-photo-trailer"
+    downloads = []
+
+    async def handler(req):
+        if req.path.endswith("/messages/m1/media"):
+            return web.json_response(
+                {
+                    "items": [
+                        media_asset("standard-1", variant="standard", data=standard),
+                        media_asset("thumb-1", variant="thumbnail"),
+                    ]
+                }
+            )
+        if req.path.endswith("/content"):
+            asset_id = req.path.split("/")[-2]
+            downloads.append(asset_id)
+            return web.Response(
+                body=standard if asset_id == "standard-1" else VALID_JPEG,
+                content_type="image/jpeg",
+            )
+        return web.Response(status=404)
+
+    async with client(await serve(handler)) as c:
+        result = await c.fetch_image("m1")
+    assert result == standard
+    assert downloads == ["standard-1"]
 
 
 async def test_fetch_image_reuses_active_job_and_falls_back_to_thumbnail_on_failure(serve):

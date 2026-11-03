@@ -184,6 +184,46 @@ def _map_media_code(code: str | None, *, quoted: bool = False, status: int = 0) 
     return MediaError("unavailable")
 
 
+def _jpeg_has_end_marker(data: bytes | bytearray) -> bool:
+    """Walk JPEG framing; metadata may contain EOI bytes and a photo may have a trailer."""
+    position = 2
+    in_scan = False
+    saw_scan = False
+    while position < len(data):
+        if in_scan:
+            position = data.find(b"\xff", position)
+            if position < 0:
+                return False
+        if data[position] != 0xFF:
+            return False
+        while position < len(data) and data[position] == 0xFF:
+            position += 1
+        if position == len(data):
+            return False
+        marker = data[position]
+        position += 1
+        if in_scan and (marker == 0x00 or 0xD0 <= marker <= 0xD7):
+            continue
+        if marker == 0xD9:
+            return saw_scan
+        if marker == 0x00 or 0xD0 <= marker <= 0xD8:
+            return False
+        if marker == 0x01:
+            continue
+        if position + 2 > len(data):
+            return False
+        length = int.from_bytes(data[position : position + 2], "big")
+        if length < 2 or position + length > len(data):
+            return False
+        position += length
+        if marker == 0xDA:
+            saw_scan = True
+            in_scan = True
+        elif marker != 0xDC:
+            in_scan = False
+    return False
+
+
 def validate_image_bytes(data: bytes, *, max_bytes: int = MAX_IMAGE_BYTES) -> str:
     if not isinstance(data, (bytes, bytearray)) or not data:
         raise MediaError("unavailable")
@@ -192,7 +232,7 @@ def validate_image_bytes(data: bytes, *, max_bytes: int = MAX_IMAGE_BYTES) -> st
     if data[:4].lower() == b"wxgf" or data.lstrip()[:1] == b"<":
         raise MediaError("unsupported_format")
     if data.startswith(b"\xff\xd8\xff"):
-        if len(data) < 12 or not data.endswith(b"\xff\xd9"):
+        if len(data) < 12 or not _jpeg_has_end_marker(data):
             raise MediaError("unavailable")
         return "image/jpeg"
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -343,7 +383,7 @@ class NativeClient:
     async def transfer_media(
         self, message_id: str, quality: str = "original", *, asset_id: str | None = None
     ) -> dict:
-        logger.info(
+        logger.debug(
             "WeChat Native 请求媒体传输：message=%s quality=%s asset=%s",
             message_id,
             quality,
@@ -411,7 +451,7 @@ class NativeClient:
 
     async def _load_image_assets(self, message_id: str, *, quoted: bool, guard=None) -> list[dict]:
         _check_guard(guard)
-        logger.info("WeChat Native 查询图片资产：message=%s quoted=%s", message_id, quoted)
+        logger.debug("WeChat Native 查询图片资产：message=%s quoted=%s", message_id, quoted)
         try:
             body = await self.media_assets(message_id)
         except NativeAPIError as error:
@@ -427,7 +467,7 @@ class NativeClient:
         if not isinstance(items, list):
             logger.warning("WeChat Native 图片资产响应格式无效：message=%s", message_id)
             raise MediaError("unavailable")
-        logger.info("WeChat Native 图片资产查询完成：message=%s count=%s", message_id, len(items))
+        logger.debug("WeChat Native 图片资产查询完成：message=%s count=%s", message_id, len(items))
         allowed_sources = {None, "quote"} if quoted else {None, "message"}
         images = []
         for item in items:
@@ -443,7 +483,7 @@ class NativeClient:
             if item.get("kind") != "image" or item.get("source") not in allowed_sources:
                 continue
             reason = item.get("reason")
-            logger.info(
+            logger.debug(
                 "WeChat Native 图片资产：message=%s asset=%s variant=%s actual_variant=%s "
                 "state=%s content_type=%s bytes=%s code=%s",
                 message_id,
@@ -517,7 +557,7 @@ class NativeClient:
                 raise MediaError("unavailable")
             state = current.get("state")
             if state != last_state:
-                logger.info(
+                logger.debug(
                     "WeChat Native 媒体任务状态：message=%s job=%s state=%s",
                     message_id,
                     job_id,
@@ -660,7 +700,7 @@ class NativeClient:
                 error.reason,
             )
             raise
-        logger.info(
+        logger.debug(
             "WeChat Native 图片校验通过：asset=%s content_type=%s bytes=%s",
             asset["id"],
             content_type,
@@ -740,7 +780,7 @@ class NativeClient:
                         )
                         try:
                             if isinstance(active_job_id, str) and active_job_id:
-                                logger.info(
+                                logger.debug(
                                     "WeChat Native 复用媒体任务：message=%s job=%s",
                                     message_id,
                                     active_job_id,

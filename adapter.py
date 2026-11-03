@@ -115,7 +115,7 @@ class WeChatNativeAdapter(Platform):
 
     def _classify(self, raw: dict, origin: str) -> str:
         def ignored(reason: str) -> str:
-            logger.info(
+            logger.debug(
                 "WeChat Native 消息忽略：message=%s reason=%s", raw.get("id"), reason
             )
             return "ignore"
@@ -237,7 +237,7 @@ class WeChatNativeAdapter(Platform):
                     if not isinstance(quote, dict) or quote.get("type") != 3:
                         raise MediaError("unavailable")
                     state = quote.get("state")
-                    logger.info(
+                    logger.debug(
                         "WeChat Native 引用图片检查：message=%s state=%s embedded_image=%s",
                         message_id,
                         state,
@@ -260,7 +260,7 @@ class WeChatNativeAdapter(Platform):
                     message_id, quoted=is_quote, guard=guard
                 )
                 guard()
-                logger.info(
+                logger.debug(
                     "WeChat Native 图片下载完成：message=%s bytes=%s", message_id, len(image_bytes)
                 )
                 enriched = convert_message(
@@ -275,12 +275,13 @@ class WeChatNativeAdapter(Platform):
                     raise RuntimeError("Native event handoff requires inspection") from None
                 self._events[message_id] = event
                 logger.info(
-                    "WeChat Native 图片已交付 AstrBot：message=%s components=%s",
+                    "WeChat Native 图片已交付 AstrBot：message=%s bytes=%s components=%s",
                     message_id,
+                    len(image_bytes),
                     len(enriched.message),
                 )
         except MediaError as error:
-            log = logger.info if error.reason == "recalled" else logger.warning
+            log = logger.debug if error.reason == "recalled" else logger.warning
             log(
                 "WeChat Native 图片处理终止：message=%s reason=%s",
                 message_id,
@@ -301,7 +302,7 @@ class WeChatNativeAdapter(Platform):
                 or wrapped.get_extra("wechat_native_quote_invalidated")
                 or self.state.message_status(message_id) != "queued"
             ):
-                logger.info(
+                logger.debug(
                     "WeChat Native 图片错误提示已抑制：message=%s reason=event_invalidated",
                     message_id,
                 )
@@ -319,7 +320,7 @@ class WeChatNativeAdapter(Platform):
                     source=raw,
                     event=wrapped,
                 )
-                logger.info(
+                logger.debug(
                     "WeChat Native 图片错误提示发送结果：message=%s sent=%s", message_id, sent
                 )
                 if (
@@ -344,7 +345,7 @@ class WeChatNativeAdapter(Platform):
                 if isinstance(send_err, asyncio.CancelledError):
                     raise
         except asyncio.CancelledError:
-            logger.info(
+            logger.debug(
                 "WeChat Native 图片任务取消：message=%s stopped=%s", message_id, self.stopped
             )
             if not self._state_closed and self.state.message_status(message_id) == "queued":
@@ -367,7 +368,7 @@ class WeChatNativeAdapter(Platform):
             return
         cursor = event["cursor"]
         if cursor_number(cursor) <= cursor_number(self.state.cursor):
-            logger.info(
+            logger.debug(
                 "WeChat Native SSE 事件忽略：cursor=%s reason=cursor_already_committed", cursor
             )
             return
@@ -413,7 +414,7 @@ class WeChatNativeAdapter(Platform):
             self.state.advance(cursor)
             return
         message_id, thread = data.get("messageId"), data.get("threadId")
-        logger.info(
+        logger.debug(
             "WeChat Native 收到消息事件：cursor=%s message=%s origin=%s",
             cursor,
             message_id,
@@ -435,7 +436,7 @@ class WeChatNativeAdapter(Platform):
             raise ValueError("message_identity_mismatch")
         origin = data.get("origin", "unknown")
         kind = self._classify(raw, origin)
-        logger.info(
+        logger.debug(
             "WeChat Native 消息分类：message=%s type=%s app_type=%s direction=%s "
             "group=%s has_text=%s result=%s enable_media=%s enable_private_reply=%s",
             message_id,
@@ -461,7 +462,7 @@ class WeChatNativeAdapter(Platform):
             cursor, message_id, thread, raw.get("serverId"), "queued" if eligible else "ignored"
         )
         if not fresh:
-            logger.info(
+            logger.debug(
                 "WeChat Native 消息去重跳过：message=%s status=%s",
                 message_id,
                 self.state.message_status(message_id),
@@ -477,7 +478,7 @@ class WeChatNativeAdapter(Platform):
                 logger.error("WeChat Native 队列交付失败；消息标识已保留，需人工检查")
                 raise RuntimeError("Native event handoff requires inspection") from None
             self._events[message_id] = wrapped
-            logger.info("WeChat Native 文本已交付 AstrBot：message=%s", message_id)
+            logger.debug("WeChat Native 文本已交付 AstrBot：message=%s", message_id)
         elif fresh and kind == "media":
             wrapped = WeChatNativeEvent(converted, self)
             self._events[message_id] = wrapped
@@ -485,7 +486,7 @@ class WeChatNativeAdapter(Platform):
             wrapped.set_extra("wechat_native_media_task", task)
             self._media_tasks.add(task)
             task.add_done_callback(self._media_tasks.discard)
-            logger.info(
+            logger.debug(
                 "WeChat Native 图片任务已调度：message=%s pending_tasks=%s",
                 message_id,
                 len(self._media_tasks),
@@ -661,7 +662,7 @@ class WeChatNativeAdapter(Platform):
                     return False
                 key = "astrbot-" + uuid.uuid4().hex
                 self.state.begin_send(key, message_id, thread)
-                logger.info(
+                logger.debug(
                     "WeChat Native 开始发送回复：message=%s receipt_key=%s", message_id, key
                 )
                 try:
