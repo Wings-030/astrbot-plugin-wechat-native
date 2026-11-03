@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 from collections.abc import AsyncIterator
 from urllib.parse import quote
 from uuid import UUID
@@ -12,6 +13,8 @@ from aiohttp.http_exceptions import LineTooLong
 
 from .config import MAX_IMAGE_BYTES, MEDIA_DOWNLOAD_TIMEOUT
 from .state import cursor_number
+
+logger = logging.getLogger("astrbot")
 
 _SAFE_CODES = {
     "event_cursor_expired",
@@ -340,14 +343,29 @@ class NativeClient:
     async def transfer_media(
         self, message_id: str, quality: str = "original", *, asset_id: str | None = None
     ) -> dict:
+        logger.info(
+            "WeChat Native 请求媒体传输：message=%s quality=%s asset=%s",
+            message_id,
+            quality,
+            asset_id,
+        )
         payload = {"messageId": message_id, "quality": quality}
         if asset_id is not None:
             payload["assetId"] = asset_id
-        return await self._request(
-            "POST",
-            self.prefix + "/messages/" + quote(message_id, safe="") + "/media-transfers",
-            json=payload,
-        )
+        try:
+            return await self._request(
+                "POST",
+                self.prefix + "/messages/" + quote(message_id, safe="") + "/media-transfers",
+                json=payload,
+            )
+        except NativeAPIError as error:
+            logger.warning(
+                "WeChat Native 媒体传输请求失败：message=%s http_status=%s code=%s",
+                message_id,
+                error.status,
+                error.code,
+            )
+            raise
 
     async def job(self, job_id: str) -> dict:
         return await self._request("GET", self.prefix + "/jobs/" + quote(job_id, safe=""))
@@ -393,14 +411,23 @@ class NativeClient:
 
     async def _load_image_assets(self, message_id: str, *, quoted: bool, guard=None) -> list[dict]:
         _check_guard(guard)
+        logger.info("WeChat Native 查询图片资产：message=%s quoted=%s", message_id, quoted)
         try:
             body = await self.media_assets(message_id)
         except NativeAPIError as error:
+            logger.warning(
+                "WeChat Native 图片资产查询失败：message=%s http_status=%s code=%s",
+                message_id,
+                error.status,
+                error.code,
+            )
             raise _map_media_code(error.code, quoted=quoted, status=error.status) from None
         _check_guard(guard)
         items = body.get("items")
         if not isinstance(items, list):
+            logger.warning("WeChat Native 图片资产响应格式无效：message=%s", message_id)
             raise MediaError("unavailable")
+        logger.info("WeChat Native 图片资产查询完成：message=%s count=%s", message_id, len(items))
         allowed_sources = {None, "quote"} if quoted else {None, "message"}
         images = []
         for item in items:
@@ -411,13 +438,30 @@ class NativeClient:
                 or not isinstance(item.get("id"), str)
                 or not item["id"]
             ):
+                logger.warning("WeChat Native 图片资产身份不匹配：message=%s", message_id)
                 raise MediaError("unavailable")
             if item.get("kind") != "image" or item.get("source") not in allowed_sources:
                 continue
+            reason = item.get("reason")
+            logger.info(
+                "WeChat Native 图片资产：message=%s asset=%s variant=%s actual_variant=%s "
+                "state=%s content_type=%s bytes=%s code=%s",
+                message_id,
+                item["id"],
+                item.get("variant"),
+                item.get("actualVariant"),
+                item.get("state"),
+                item.get("contentType"),
+                item.get("byteLength"),
+                reason if isinstance(reason, str) and reason in _SAFE_CODES else None,
+            )
             if item.get("state") == "recalled" or item.get("reason") == "message_recalled":
                 raise MediaError("recalled")
             images.append(item)
         if not images:
+            logger.warning(
+                "WeChat Native 未找到匹配的图片资产：message=%s quoted=%s", message_id, quoted
+            )
             raise MediaError("expired" if quoted else "unavailable")
         return images
 
@@ -434,13 +478,23 @@ class NativeClient:
         if not isinstance(job_id, str) or not job_id:
             raise MediaError("unavailable")
         current = initial
+        last_state = None
         while True:
             _check_guard(guard)
             if current is None:
                 try:
                     current = await self.job(job_id)
                 except NativeAPIError as error:
-                    if error.status in {0, 408, 429} or 500 <= error.status < 600:
+                    retryable = error.status in {0, 408, 429} or 500 <= error.status < 600
+                    logger.log(
+                        logging.DEBUG if retryable else logging.WARNING,
+                        "WeChat Native 媒体任务查询失败：message=%s job=%s http_status=%s code=%s",
+                        message_id,
+                        job_id,
+                        error.status,
+                        error.code,
+                    )
+                    if retryable:
                         await asyncio.sleep(self.poll_interval)
                         continue
                     raise _map_media_code(error.code, quoted=quoted, status=error.status) from None
@@ -457,8 +511,19 @@ class NativeClient:
                     and current.get("assetId") != asset_id
                 )
             ):
+                logger.warning(
+                    "WeChat Native 媒体任务身份不匹配：message=%s job=%s", message_id, job_id
+                )
                 raise MediaError("unavailable")
             state = current.get("state")
+            if state != last_state:
+                logger.info(
+                    "WeChat Native 媒体任务状态：message=%s job=%s state=%s",
+                    message_id,
+                    job_id,
+                    state,
+                )
+                last_state = state
             if state in {"available", "completed", "succeeded"}:
                 return current
             if isinstance(state, str) and state in {
@@ -475,6 +540,12 @@ class NativeClient:
                 if state == "expired":
                     raise MediaError("expired")
                 code = _extract_job_error_code(current)
+                logger.warning(
+                    "WeChat Native 媒体任务失败：message=%s job=%s code=%s",
+                    message_id,
+                    job_id,
+                    code if code in _SAFE_CODES else "request_failed",
+                )
                 raise _map_media_code(code, quoted=quoted)
             if not isinstance(state, str) or state not in {"queued", "running", "pending"}:
                 raise MediaError("unavailable")
@@ -488,6 +559,13 @@ class NativeClient:
         is_wxgf = (
             asset.get("contentType") == "image/x-wxgf"
             or str(asset.get("format", "")).lower() == "wxgf"
+        )
+        logger.info(
+            "WeChat Native 下载图片资产：message=%s asset=%s variant=%s preview=%s",
+            asset.get("messageId"),
+            asset["id"],
+            _effective_variant(asset),
+            is_wxgf,
         )
         if is_wxgf:
             preview = asset.get("preview")
@@ -511,9 +589,21 @@ class NativeClient:
             try:
                 data, _ = await self.media_content(asset["id"], preview=True, max_bytes=max_bytes)
             except NativeAPIError as error:
+                logger.warning(
+                    "WeChat Native 图片预览下载失败：asset=%s http_status=%s code=%s",
+                    asset["id"],
+                    error.status,
+                    error.code,
+                )
                 raise _map_media_code(error.code, quoted=quoted, status=error.status) from None
             _check_guard(guard)
             if isinstance(preview_len, int) and len(data) != preview_len:
+                logger.warning(
+                    "WeChat Native 图片预览长度不匹配：asset=%s expected=%s actual=%s",
+                    asset["id"],
+                    preview_len,
+                    len(data),
+                )
                 raise MediaError("unavailable")
             preview_sha = preview_meta.get("sha256")
             if (
@@ -521,6 +611,7 @@ class NativeClient:
                 and preview_sha
                 and hashlib.sha256(data).hexdigest().lower() != preview_sha.lower()
             ):
+                logger.warning("WeChat Native 图片预览散列校验失败：asset=%s", asset["id"])
                 raise MediaError("unavailable")
         else:
             byte_len = asset.get("byteLength")
@@ -535,9 +626,21 @@ class NativeClient:
             try:
                 data, _ = await self.media_content(asset["id"], preview=False, max_bytes=max_bytes)
             except NativeAPIError as error:
+                logger.warning(
+                    "WeChat Native 图片内容下载失败：asset=%s http_status=%s code=%s",
+                    asset["id"],
+                    error.status,
+                    error.code,
+                )
                 raise _map_media_code(error.code, quoted=quoted, status=error.status) from None
             _check_guard(guard)
             if isinstance(byte_len, int) and len(data) != byte_len:
+                logger.warning(
+                    "WeChat Native 图片内容长度不匹配：asset=%s expected=%s actual=%s",
+                    asset["id"],
+                    byte_len,
+                    len(data),
+                )
                 raise MediaError("unavailable")
             sha = asset.get("sha256")
             if (
@@ -545,8 +648,24 @@ class NativeClient:
                 and sha
                 and hashlib.sha256(data).hexdigest().lower() != sha.lower()
             ):
+                logger.warning("WeChat Native 图片内容散列校验失败：asset=%s", asset["id"])
                 raise MediaError("unavailable")
-        validate_image_bytes(data, max_bytes=max_bytes)
+        try:
+            content_type = validate_image_bytes(data, max_bytes=max_bytes)
+        except MediaError as error:
+            logger.warning(
+                "WeChat Native 图片格式校验失败：asset=%s bytes=%s reason=%s",
+                asset["id"],
+                len(data),
+                error.reason,
+            )
+            raise
+        logger.info(
+            "WeChat Native 图片校验通过：asset=%s content_type=%s bytes=%s",
+            asset["id"],
+            content_type,
+            len(data),
+        )
         return data
 
     async def fetch_image(
@@ -621,6 +740,11 @@ class NativeClient:
                         )
                         try:
                             if isinstance(active_job_id, str) and active_job_id:
+                                logger.info(
+                                    "WeChat Native 复用媒体任务：message=%s job=%s",
+                                    message_id,
+                                    active_job_id,
+                                )
                                 await self._poll_media_job(
                                     active_job_id,
                                     message_id=message_id,
@@ -674,6 +798,11 @@ class NativeClient:
                         except MediaError as error:
                             if error.reason in {"recalled", "missing_scope"}:
                                 raise
+                            logger.warning(
+                                "WeChat Native 高清传输失败，尝试回退：message=%s reason=%s",
+                                message_id,
+                                error.reason,
+                            )
                             errors.append(error)
                         break
 
@@ -722,6 +851,11 @@ class NativeClient:
                         raise MediaError(priority)
                 raise MediaError("unavailable")
         except TimeoutError:
+            logger.warning(
+                "WeChat Native 图片读取超时：message=%s timeout_seconds=%s",
+                message_id,
+                self.media_timeout,
+            )
             raise MediaError("unavailable") from None
 
     async def send(self, send_id: str):
