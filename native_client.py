@@ -854,27 +854,36 @@ class NativeClient:
         self, message_id: str, kind: str, *, quoted: bool, guard=None
     ) -> list[dict]:
         _check_guard(guard)
-        logger.debug("WeChat Native 查询图片资产：message=%s quoted=%s", message_id, quoted)
+        media_label = {"file": "PDF", "voice": "语音", "image": "图片"}.get(kind, "媒体")
+        media_kind = "pdf" if kind == "file" else kind if kind in {"voice", "image"} else "image"
+        logger.debug(
+            "WeChat Native 查询%s资产：message=%s quoted=%s", media_label, message_id, quoted
+        )
         try:
             body = await self.media_assets(message_id)
         except NativeAPIError as error:
             if quoted and error.status == 409 and error.code == "media_metadata_invalid":
                 raise QuotedMediaMetadataError() from None
             logger.warning(
-                "WeChat Native 图片资产查询失败：message=%s http_status=%s code=%s",
+                "WeChat Native %s资产查询失败：message=%s http_status=%s code=%s",
+                media_label,
                 message_id,
                 error.status,
                 error.code,
             )
-            raise _map_media_code(error.code, quoted=quoted, status=error.status) from None
+            raise _map_media_code(
+                error.code, quoted=quoted, status=error.status, media_kind=media_kind
+            ) from None
         _check_guard(guard)
         items = body.get("items")
         if not isinstance(items, list):
-            logger.warning("WeChat Native 图片资产响应格式无效：message=%s", message_id)
-            raise MediaError("unavailable")
-        logger.debug("WeChat Native 图片资产查询完成：message=%s count=%s", message_id, len(items))
+            logger.warning("WeChat Native %s资产响应格式无效：message=%s", media_label, message_id)
+            raise MediaError("unavailable", media_kind=media_kind)
+        logger.debug(
+            "WeChat Native %s资产查询完成：message=%s count=%s", media_label, message_id, len(items)
+        )
         allowed_sources = {None, "quote"} if quoted else {None, "message"}
-        images = []
+        matched = []
         for item in items:
             if (
                 not isinstance(item, dict)
@@ -883,14 +892,17 @@ class NativeClient:
                 or not isinstance(item.get("id"), str)
                 or not item["id"]
             ):
-                logger.warning("WeChat Native 图片资产身份不匹配：message=%s", message_id)
-                raise MediaError("unavailable")
+                logger.warning(
+                    "WeChat Native %s资产身份不匹配：message=%s", media_label, message_id
+                )
+                raise MediaError("unavailable", media_kind=media_kind)
             if item.get("kind") != kind or item.get("source") not in allowed_sources:
                 continue
             reason = item.get("reason")
             logger.debug(
-                "WeChat Native 图片资产：message=%s asset=%s variant=%s actual_variant=%s "
+                "WeChat Native %s资产：message=%s asset=%s variant=%s actual_variant=%s "
                 "state=%s content_type=%s bytes=%s code=%s",
+                media_label,
                 message_id,
                 item["id"],
                 item.get("variant"),
@@ -901,14 +913,17 @@ class NativeClient:
                 reason if isinstance(reason, str) and reason in _SAFE_CODES else None,
             )
             if item.get("state") == "recalled" or item.get("reason") == "message_recalled":
-                raise MediaError("recalled")
-            images.append(item)
-        if not images:
+                raise MediaError("recalled", media_kind=media_kind)
+            matched.append(item)
+        if not matched:
             logger.warning(
-                "WeChat Native 未找到匹配的图片资产：message=%s quoted=%s", message_id, quoted
+                "WeChat Native 未找到匹配的%s资产：message=%s quoted=%s",
+                media_label,
+                message_id,
+                quoted,
             )
-            raise MediaError("expired" if quoted else "unavailable")
-        return images
+            raise MediaError("expired" if quoted else "unavailable", media_kind=media_kind)
+        return matched
 
     async def _poll_media_job(
         self,

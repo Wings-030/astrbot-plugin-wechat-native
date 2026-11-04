@@ -140,7 +140,8 @@ def convert_message(
                 chain=[Plain(quoted_text)],
             )
         )
-    result.message.append(Plain(text))
+    if text or (image_bytes is None and voice_bytes is None):
+        result.message.append(Plain(text))
     if image_bytes is not None:
         result.message.append(Image.fromBytes(image_bytes))
     if voice_bytes is not None:

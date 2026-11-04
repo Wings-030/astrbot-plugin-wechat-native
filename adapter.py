@@ -346,7 +346,9 @@ class WeChatNativeAdapter(Platform):
         file_asked = bool(re.search(r"(?i)pdf", prompt)) or (
             sources["pdf"] is not None and bool(re.search(r"文件|文档|论文|这份|那份", prompt))
         )
-        voice_asked = bool(re.search(r"语音|录音|音频|听听|听一下", prompt))
+        voice_asked = bool(
+            re.search(r"语音|录音|音频|听听|听一下|转文字|转成文字|说了啥|说了什么", prompt)
+        )
         wanted = [
             name
             for name, asked in (("image", image_asked), ("pdf", file_asked), ("voice", voice_asked))
@@ -410,7 +412,7 @@ class WeChatNativeAdapter(Platform):
             raise fail("unavailable")
         original_id = self.state.find_message_id(raw["threadId"], quote["serverId"])
         if original_id is None:
-            raise fail("unavailable" if recent or not pdf else "expired")
+            raise fail("unavailable" if recent or media_kind == "image" else "expired")
         try:
             guard()
             await self._check_quote_original(raw, wrapped, original_id)
@@ -509,12 +511,20 @@ class WeChatNativeAdapter(Platform):
                     ):
                         raise MediaError("unavailable", media_kind=media_kind)
                     state = quote.get("state")
-                    logger.debug(
-                        "WeChat Native 引用图片检查：message=%s state=%s embedded_image=%s",
-                        message_id,
-                        state,
-                        quote.get("embeddedImage") is True,
-                    )
+                    if media_kind == "image":
+                        logger.debug(
+                            "WeChat Native 引用图片检查：message=%s state=%s embedded_image=%s",
+                            message_id,
+                            state,
+                            quote.get("embeddedImage") is True,
+                        )
+                    else:
+                        logger.debug(
+                            "WeChat Native 引用%s检查：message=%s state=%s",
+                            label,
+                            message_id,
+                            state,
+                        )
                     if state == "recalled":
                         wrapped.set_extra("wechat_native_quote_invalidated", True)
                         wrapped.stop_event()
@@ -679,7 +689,7 @@ class WeChatNativeAdapter(Platform):
                     event=wrapped,
                 )
                 logger.debug(
-                    "WeChat Native 图片错误提示发送结果：message=%s sent=%s", message_id, sent
+                    "WeChat Native %s错误提示发送结果：message=%s sent=%s", label, message_id, sent
                 )
                 if (
                     not sent
@@ -689,7 +699,8 @@ class WeChatNativeAdapter(Platform):
                     self.state.mark_message(message_id, "no_reply")
             except (Exception, asyncio.CancelledError) as send_err:
                 logger.error(
-                    "WeChat Native 图片错误提示发送失败：message=%s error_type=%s",
+                    "WeChat Native %s错误提示发送失败：message=%s error_type=%s",
+                    label,
                     message_id,
                     type(send_err).__name__,
                 )
@@ -704,7 +715,7 @@ class WeChatNativeAdapter(Platform):
                     raise
         except asyncio.CancelledError:
             logger.debug(
-                "WeChat Native 图片任务取消：message=%s stopped=%s", message_id, self.stopped
+                "WeChat Native %s任务取消：message=%s stopped=%s", label, message_id, self.stopped
             )
             if not self._state_closed and self.state.message_status(message_id) == "queued":
                 self.state.mark_message(message_id, "needs_review")
@@ -714,7 +725,8 @@ class WeChatNativeAdapter(Platform):
             if not self._state_closed and self.state.message_status(message_id) == "queued":
                 self.state.mark_message(message_id, "needs_review")
             logger.error(
-                "WeChat Native 图片处理失败：message=%s error_type=%s；消息标识已保留，需人工检查",
+                "WeChat Native %s处理失败：message=%s error_type=%s；消息标识已保留，需人工检查",
+                label,
                 message_id,
                 type(error).__name__,
             )
@@ -880,8 +892,12 @@ class WeChatNativeAdapter(Platform):
             wrapped.set_extra("wechat_native_media_task", task)
             self._media_tasks.add(task)
             task.add_done_callback(self._media_tasks.discard)
+            media_label = {"pdf": "PDF", "voice": "语音", "image": "图片"}.get(
+                wrapped.get_extra("wechat_native_media_kind"), "媒体"
+            )
             logger.debug(
-                "WeChat Native 图片任务已调度：message=%s pending_tasks=%s",
+                "WeChat Native %s任务已调度：message=%s pending_tasks=%s",
+                media_label,
                 message_id,
                 len(self._media_tasks),
             )

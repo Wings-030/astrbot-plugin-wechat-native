@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import io
+import re
 import sqlite3
 import struct
 import wave
@@ -379,6 +380,7 @@ async def test_inbound_voice_native_wav_delivered_and_deduplicated(serve, tmp_pa
         records = [part for part in event.get_messages() if isinstance(part, Record)]
         assert len(records) == 1
         assert records[0].file == "base64://" + base64.b64encode(WAV).decode()
+        assert not any(isinstance(part, Plain) and part.text == "" for part in event.get_messages())
         if state == "pending":
             assert (
                 len(
@@ -493,6 +495,54 @@ async def test_group_recent_or_quoted_voice_with_real_mention(serve, tmp_path, q
         assert event.message_str == "听听刚才的语音"
         assert any(isinstance(part, Record) for part in event.get_messages())
         assert event.get_extra("wechat_native_quote_original_id") == "voice-original"
+    finally:
+        await result.adapter.terminate()
+
+
+@pytest.mark.parametrize(
+    "prompt_text",
+    ["@机器人\u2005转文字", "@机器人\u2005说了啥", "@机器人\u2005转成文字"],
+)
+async def test_group_recent_voice_trigger_keywords(serve, tmp_path, prompt_text):
+    voice = message(
+        id="voice-original", serverId="800", type=34, body=None, threadId="room@chatroom"
+    )
+    request = message(
+        id="request",
+        threadId="room@chatroom",
+        body=prompt_text,
+        mentions={"state": "known", "self": True},
+    )
+    result = await env(serve, tmp_path, request)
+    result.add_voice(voice)
+    try:
+        await drain_voice(result, voice)
+        await drain_voice(result, request, "2")
+        event = result.queue.get_nowait()
+        expected = re.sub(r"^(?:@[^\u2005\r\n]+\u2005[ \t]*)+", "", prompt_text)
+        assert event.message_str == expected
+        assert any(isinstance(part, Record) for part in event.get_messages())
+        assert event.get_extra("wechat_native_quote_original_id") == "voice-original"
+    finally:
+        await result.adapter.terminate()
+
+
+async def test_missing_quoted_voice_reports_expired(serve, tmp_path):
+    request = message(
+        id="request",
+        threadId="room@chatroom",
+        body="@机器人\u2005帮我听听",
+        type=49,
+        appMessageType=57,
+        quote={"serverId": "nonexistent", "senderId": "user", "type": 34, "state": "unsupported"},
+        mentions={"state": "known", "self": True},
+    )
+    result = await env(serve, tmp_path, request)
+    try:
+        await drain_voice(result, request)
+        assert result.queue.empty()
+        assert len(result.posts) == 1
+        assert "引用的语音已失效" in result.posts[0][1]["text"]
     finally:
         await result.adapter.terminate()
 
