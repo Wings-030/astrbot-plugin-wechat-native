@@ -588,12 +588,26 @@ async def test_voice_recall_during_download_suppresses_asr_and_reply(serve, tmp_
         await result.adapter.terminate()
 
 
-@pytest.mark.parametrize("bad", ["unknown", "truncated", "too_long", "too_large"])
+def test_streaming_wav_placeholder_sizes_are_normalized():
+    client = module("native_client")
+    data = bytearray(WAV)
+    data[4:8] = (0xFFFFFFE4).to_bytes(4, "little")
+    data[40:44] = (0xFFFFFFE0).to_bytes(4, "little")
+    streaming = bytes(data)
+    assert client.validate_voice_bytes(streaming) == "audio/wav"
+    fixed = client._normalize_streaming_wav(streaming)
+    assert int.from_bytes(fixed[4:8], "little") == len(streaming) - 8
+    assert int.from_bytes(fixed[40:44], "little") == len(streaming) - 44
+    assert fixed[44:] == streaming[44:]
+    assert client._normalize_streaming_wav(fixed) == fixed
+
+
+@pytest.mark.parametrize("bad", ["unknown", "empty_pcm", "too_long", "too_large"])
 async def test_bad_outgoing_audio_is_not_uploaded(serve, tmp_path, bad):
     result = await env(serve, tmp_path)
     data = {
         "unknown": b"not audio",
-        "truncated": WAV[:-10],
+        "empty_pcm": WAV[:44],
         "too_long": wav(301),
         "too_large": b"ID3" + b"x" * module("config").MAX_VOICE_BYTES,
     }[bad]
@@ -861,3 +875,40 @@ async def test_float_wav_tts_is_decoded_by_native_instead_of_rejected_locally(se
         assert result.posts[0][1]["kind"] == "voice"
     finally:
         await result.adapter.terminate()
+
+
+@pytest.mark.parametrize(
+    "riff_size,data_size",
+    [
+        (0xFFFFFFE4, None),
+        (len(WAV) + 100, None),
+        (None, 0xFFFFFFFF),
+        (0xFFFFFFE4, 0xFFFFFFFF),
+    ],
+)
+def test_streaming_wav_uses_actual_pcm_frames(riff_size, data_size):
+    data = bytearray(WAV)
+    if riff_size is not None:
+        data[4:8] = struct.pack("<I", riff_size)
+    if data_size is not None:
+        data[40:44] = struct.pack("<I", data_size)
+    native = module("native_client")
+    assert native.validate_voice_bytes(bytes(data)) == "audio/wav"
+    with pytest.raises(native.MediaError):
+        native.validate_voice_bytes(bytes(data), normal=True)
+
+
+def test_streaming_wav_over_300_actual_seconds_is_rejected():
+    data = bytearray(wav(301))
+    data[4:8] = struct.pack("<I", 0xFFFFFFE4)
+    data[40:44] = struct.pack("<I", 0xFFFFFFFF)
+    native = module("native_client")
+    with pytest.raises(native.MediaError) as error:
+        native.validate_voice_bytes(bytes(data))
+    assert error.value.reason == "too_large"
+
+
+def test_riff_garbage_without_audio_format_is_rejected():
+    native = module("native_client")
+    with pytest.raises(native.MediaError):
+        native.validate_voice_bytes(b"RIFF" + struct.pack("<I", 16) + b"WAVEdata" + b"\0" * 8)

@@ -414,6 +414,29 @@ def validate_image_bytes(data: bytes, *, max_bytes: int = MAX_IMAGE_BYTES) -> st
     raise MediaError("unsupported_format")
 
 
+def _normalize_streaming_wav(data: bytes) -> bytes:
+    """Rewrite placeholder RIFF/data chunk sizes so the daemon can parse streaming WAV."""
+    if not (data.startswith(b"RIFF") and data[8:12] == b"WAVE"):
+        return data
+    total = len(data)
+    if int.from_bytes(data[4:8], "little") + 8 <= total:
+        return data
+    out = bytearray(data)
+    out[4:8] = (total - 8).to_bytes(4, "little")
+    index = 12
+    while index + 8 <= total:
+        chunk_id = bytes(out[index:index + 4])
+        chunk_size = int.from_bytes(out[index + 4:index + 8], "little")
+        available = total - index - 8
+        if chunk_id == b"data":
+            out[index + 4:index + 8] = available.to_bytes(4, "little")
+            break
+        if chunk_size > available:
+            break
+        index += 8 + chunk_size + (chunk_size & 1)
+    return bytes(out)
+
+
 def validate_voice_bytes(data: bytes, *, normal: bool = False) -> str:
     """Check containers; Native owns decoding and duration checks for compressed audio."""
     if not data:
@@ -421,23 +444,27 @@ def validate_voice_bytes(data: bytes, *, normal: bool = False) -> str:
     if len(data) > MAX_VOICE_BYTES:
         raise MediaError("too_large", media_kind="voice")
     if data.startswith(b"RIFF") and data[8:12] == b"WAVE":
-        if int.from_bytes(data[4:8], "little") + 8 > len(data):
+        if normal and int.from_bytes(data[4:8], "little") + 8 > len(data):
             raise MediaError("unavailable", media_kind="voice")
         try:
             with wave.open(io.BytesIO(data)) as audio:
-                frames, rate = audio.getnframes(), audio.getframerate()
+                declared_frames, rate = audio.getnframes(), audio.getframerate()
                 channels, width = audio.getnchannels(), audio.getsampwidth()
-                if not frames or not rate or not channels:
+                if not rate or not channels or not width:
+                    raise MediaError("unavailable", media_kind="voice")
+                pcm = audio.readframes(len(data))
+                if normal and len(pcm) != declared_frames * channels * width:
+                    raise MediaError("unavailable", media_kind="voice")
+                frames = len(pcm) // (channels * width)
+                if not frames or len(pcm) % (channels * width):
                     raise MediaError("unavailable", media_kind="voice")
                 if frames > rate * (60 if normal else MAX_VOICE_SECONDS):
                     raise MediaError("too_large", media_kind="voice")
                 if normal and (channels, width, rate) != (1, 2, 16000):
                     raise MediaError("unsupported_format", media_kind="voice")
-                if len(audio.readframes(frames)) != frames * channels * width:
-                    raise MediaError("unavailable", media_kind="voice")
             return "audio/wav"
-        except wave.Error:
-            if not normal:
+        except wave.Error as error:
+            if not normal and str(error).startswith("unknown format:"):
                 # Float/compressed WAV from TTS is valid input to Native's FFmpeg
                 # path even when Python's PCM-only reader cannot open it.
                 return "audio/wav"
@@ -1521,6 +1548,8 @@ class NativeClient:
     ) -> dict:
         if validate_voice_bytes(data) != content_type:
             raise ValueError("发送语音 MIME 与内容不匹配")
+        if content_type == "audio/wav":
+            data = _normalize_streaming_wav(data)
         suffix = {
             "audio/wav": "wav",
             "audio/mpeg": "mp3",
