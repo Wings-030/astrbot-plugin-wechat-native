@@ -7,7 +7,6 @@ import hashlib
 import io
 import ipaddress
 import json
-import logging
 import re
 import socket
 import wave
@@ -19,6 +18,7 @@ from uuid import UUID
 
 import aiohttp
 from aiohttp.http_exceptions import LineTooLong
+from astrbot.api import logger
 
 from .config import (
     MAX_IMAGE_BYTES,
@@ -31,8 +31,6 @@ from .config import (
     VOICE_SEND_TIMEOUT,
 )
 from .state import cursor_number
-
-logger = logging.getLogger("astrbot")
 
 _SAFE_CODES = {
     "event_cursor_expired",
@@ -933,8 +931,7 @@ class NativeClient:
                     current = await self.job(job_id)
                 except NativeAPIError as error:
                     retryable = error.status in {0, 408, 429} or 500 <= error.status < 600
-                    logger.log(
-                        logging.DEBUG if retryable else logging.WARNING,
+                    (logger.debug if retryable else logger.warning)(
                         "WeChat Native 媒体任务查询失败：message=%s job=%s http_status=%s code=%s",
                         message_id,
                         job_id,
