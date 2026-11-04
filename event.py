@@ -1,12 +1,13 @@
 """AstrBot message conversion and event lifecycle."""
 
 import asyncio
+import base64
 import re
 from datetime import UTC, datetime
 from urllib.parse import quote, unquote
 
 from astrbot.api.event import AstrMessageEvent, MessageChain
-from astrbot.api.message_components import At, AtAll, Image, Plain, Reply
+from astrbot.api.message_components import At, AtAll, Image, Plain, Record, Reply
 from astrbot.api.platform import AstrBotMessage, Group, MessageMember, MessageType
 
 from .config import DEFAULT_IMAGE_PROMPT, DEFAULT_PDF_PROMPT
@@ -69,6 +70,7 @@ def convert_message(
     *,
     image_bytes: bytes | None = None,
     pdf_name: str | None = None,
+    voice_bytes: bytes | None = None,
 ) -> AstrBotMessage:
     result = AstrBotMessage()
     thread, sender = raw["threadId"], raw["senderId"]
@@ -82,6 +84,8 @@ def convert_message(
     result.sender = MessageMember(user_id=sender, nickname=sender)
     result.group = Group(group_id=thread) if group else None
     text = raw["body"] if isinstance(raw.get("body"), str) else ""
+    if voice_bytes is not None and raw.get("type") == 34:
+        text = ""  # Native voice metadata is not the user's transcript; AstrBot ASR fills it.
     mentions = raw.get("mentions")
     if (
         group
@@ -117,6 +121,8 @@ def convert_message(
                 quoted_text = "[图片]"
         elif pdf_name is not None and quote.get("type") == 49 and state != "recalled":
             quoted_text = f"[PDF 文件] {pdf_name}"
+        elif voice_bytes is not None and quote.get("type") == 34 and state != "recalled":
+            quoted_text = "[语音]"
         elif state == "recalled":
             quoted_text = "引用消息已撤回"
         elif state == "unsupported":
@@ -134,6 +140,8 @@ def convert_message(
     result.message.append(Plain(text))
     if image_bytes is not None:
         result.message.append(Image.fromBytes(image_bytes))
+    if voice_bytes is not None:
+        result.message.append(Record.fromBase64(base64.b64encode(voice_bytes).decode("ascii")))
     result.raw_message = raw
     result.timestamp = message_timestamp(raw) or int(datetime.now(UTC).timestamp())
     return result
@@ -141,8 +149,8 @@ def convert_message(
 
 def serialize_chain(
     chain: MessageChain, *, group: bool
-) -> tuple[list[str | Image], dict | None, str | None]:
-    """Keep images between contiguous text runs; metadata belongs to the first text run."""
+) -> tuple[list[str | Image | Record], dict | None, str | None]:
+    """Keep media between contiguous text runs; metadata belongs to the first text run."""
     parts, text, users, all_members = [], [], [], False
     reply_id = None
 
@@ -155,7 +163,7 @@ def serialize_chain(
     for component in chain.chain:
         if isinstance(component, Plain):
             text.append(component.text)
-        elif isinstance(component, Image):
+        elif isinstance(component, (Image, Record)):
             flush_text()
             parts.append(component)
         elif isinstance(component, At):
@@ -172,7 +180,7 @@ def serialize_chain(
                 raise ValueError("Native 引用回复需要且只能指定一条原消息")
             reply_id = target
         else:
-            raise ValueError("WeChat Native 仅支持发送文本、图片、引用和群 @")
+            raise ValueError("WeChat Native 仅支持发送文本、图片、语音、引用和群 @")
     flush_text()
     if (users or all_members) and not group:
         users, all_members = [], False
@@ -180,14 +188,14 @@ def serialize_chain(
         raise ValueError("不能同时 @个人和 @全体")
     mentions = {"all": True} if all_members else {"userIds": users} if users else None
     if parts and not any(isinstance(part, str) for part in parts) and (mentions or reply_id):
-        raise ValueError("Native 图片接口不支持引用或 @，请在消息链中添加文本承载这些信息")
+        raise ValueError("Native 媒体接口不支持引用或 @，请在消息链中添加文本承载这些信息")
     return parts, mentions, reply_id
 
 
 def serialize_text(chain: MessageChain, *, group: bool) -> tuple[str, dict | None, str | None]:
     parts, mentions, reply_id = serialize_chain(chain, group=group)
     if any(not isinstance(part, str) for part in parts):
-        raise ValueError("图片消息需要通过 send_chain 发送")
+        raise ValueError("媒体消息需要通过 send_chain 发送")
     return "".join(parts), mentions, reply_id
 
 

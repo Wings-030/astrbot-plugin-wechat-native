@@ -2,8 +2,8 @@
 
 让 AstrBot 通过 **agent-wechat-native /v1 API** 接入个人微信。插件装在 AstrBot 内，不需要额外 Bridge 服务。
 
-支持文本私聊、发送图片、图片识别、群聊 @回复、群聊摘要、原生引用回复、白名单、独立会话、断线重连和持久化去重。
-支持开启机器人的**文本转图片**功能；暂不支持语音及普通文件发送。
+支持文本私聊、发送图片、微信语音收发、图片识别、PDF 解析、群聊 @回复、群聊摘要、原生引用回复、白名单、独立会话、断线重连和持久化去重。
+支持开启机器人的**文本转图片**功能；普通文件发送暂不支持。
 
 适配版本：**AstrBot >=4.29.3,<5、Native v1.4.0**；插件运行需要 **Python 3.12+**。
 
@@ -38,9 +38,9 @@ Native Token 需要目标账号的 **read + send + media** 权限。本文 Compo
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
 | `enable_private_reply` | `true` | 是否回复私聊 |
-| `enable_media` | `true` | 启用图片识别，支持私聊图片、群聊引用图片 + @，以及先发图再 @ |
+| `enable_media` | `true` | 启用图片、PDF 与语音接收；群聊支持引用媒体 + @或先发送再 @ |
 | `allowed_users` | `[]` | 私聊 senderId 白名单；空列表允许所有人，不限制群成员 |
-| `group_reply_mode` | `mention` | `mention`：真正 @机器人；`all`：全部群文本；`disabled`：不回复群聊 |
+| `group_reply_mode` | `mention` | `mention`：真正 @机器人；`all`：全部群文本与直接语音；`disabled`：不回复群聊 |
 | `allowed_groups` | `[]` | 群 threadId 白名单，通常以 `@chatroom` 结尾；空列表允许所有群 |
 | `unique_session` | `true` | 同群不同成员独立会话；关闭后同群共享会话 |
 
@@ -86,6 +86,67 @@ URL 图片仅允许公网 HTTP(S) 和 80/443 端口，不携带 Native Token、C
 连接时校验实际 DNS 地址，拒绝内网、环回、链路本地及其他非公网地址；最多跟随 3 次重定向，
 每一跳重新检查。下载总超时 15 秒、连接及连续读取超时各 5 秒，流式限制 10 MiB，
 拒绝压缩传输。内网图床请改为本地路径或 bytes 来源。
+
+### 微信语音收发
+
+**接收语音**使用现有 `enable_media` 开关（默认开启）。插件识别微信 `type=34`，
+通过 Native Media API 获取 `normal` 变体，由 Native 将 SILK 解码为 **16 kHz、单声道、16 位 PCM WAV**。
+校验账号、消息、资产身份、大小和 SHA-256 后，生成标准 AstrBot `Record`，
+由 AstrBot 现有 ASR 流程识别；插件不调用特定语音服务，也不会把微信语音 XML 当作用户文字。
+
+1. 在机器人所使用的 AstrBot 配置中开启**语音转文字/ASR**（`provider_stt_settings.enable`），
+   并为该会话选择 ASR 提供商；也可使用能处理标准 `Record` 的 ASR 插件。
+2. 私聊直接发送微信语音即可，仍遵守私聊开关和 `allowed_users`。
+3. 默认 `mention` 群聊模式：先发语音，再由同一成员在 **2 分钟内真正 @机器人**发送
+   `听听刚才的语音`、`识别这段录音`，或只 @机器人；也可引用语音并真正 @机器人提问。
+   普通群语音仅临时保存消息标识，不会提前下载或识别。
+4. `all` 模式允许直接处理群语音；`disabled`、`allowed_groups` 和成员独立会话规则照常生效。
+   引用语音仍要求真正 @机器人。引用原消息必须已记录在同一账号、同一聊天，其他成员的语音请明确引用。
+
+没有配置 ASR 时，插件仍交付 `Record`，不会自行选择服务商或捏造转写结果；
+AI 是否能理解音频取决于 AstrBot 的 ASR、插件或模型配置。群聊摘要仍只收集原有文本，不收集语音转写。
+撤回会取消待处理任务；下载前后及发送回复前会检查来源身份和撤回状态。
+媒体下载默认总超时 60 秒，接收的单条微信语音上限 60 秒；音频内容不写入插件 SQLite。
+交付后的临时 WAV 由 AstrBot 标准媒体流程创建并管理。
+
+**发送语音**支持 AstrBot TTS/插件产生的标准 `Record`：本地路径、file URI、
+`Record.fromFileSystem(path)`、`Record.fromURL(url)`、`Record.fromBase64(data)`、
+音频 base64 data URI 和裸 base64；遵循 `Record` 的 `file → url → path` 来源回退。
+同一 AstrBot 内的 TTS 建议设置 `provider_tts_settings.use_file_service: false`，直接使用生成的本地音频路径。
+例如：
+
+```python
+from astrbot.api.event import MessageChain
+from astrbot.api.message_components import Plain, Record
+
+await event.send(MessageChain([
+    Plain("这是语音回复："),
+    Record.fromFileSystem("/app/data/tts-output.wav"),
+]))
+```
+
+插件先 `/uploads`，再 `/sends` 提交 **`kind=voice`**，发送原生微信语音，绝不降级为普通文件。
+支持私聊、群聊、主动发送，以及与文本、图片混合的消息链顺序。
+语音本身不支持 Native 引用/@字段；需要这些信息时在消息链中添加非空文本，由首段文本承载。
+纯语音回复不自动 @；TTS 的 `Record.text` 只是附带元数据，不会额外重复发送成文字。
+
+支持 Native 的 WAV、MP3、FLAC、Ogg、AAC、M4A/MP4、WebM 和 SILK 来源，
+容器内音频编码能否解码由 Native 判断。**每个来源最多 26,214,383 字节、总长 300 秒**；
+Native 负责格式转换和内置 SILK 编码，并将超过 60 秒的音频拆为尽量等长、每条不超过 60 秒的微信语音。
+建议在 **Native 所在主机/容器**安装 FFmpeg，以处理压缩音频及其他采样格式；
+16 kHz 单声道 PCM16 WAV 和支持的 SILK 可使用 Native 内置处理路径。插件不自行切片或重复编码。
+
+一个 `Record` 对应一次上传、一个幂等键和一个 Native job，默认最多等待 25 分钟。
+逐段 `index/state/durationMs/serverMessageId` 回执存入 SQLite 的 `send_chunks`，
+与原 `sends` 表的 job ID 关联；旧文本和图片状态无需迁移或清空。
+长语音部分成功后发生失败、超时、断线或未知状态，会保留已接受片段的 ID，
+消息标记 `partial`，不确定的 job 保留 `needs_review`，并停止消息链剩余部分。
+提交结果不明时只查询原幂等键/原 job，不会自动重发、重新拆分或重试剩余语音片段。
+重启继续保留这些回执供人工核查。Native `accepted` 不代表已在收件端成功播放，实际微信效果需实测。
+
+URL 音频复用图片的公网 HTTP(S)、80/443 端口、DNS/SSRF 校验和最多 3 次重定向限制，
+下载总超时 15 秒、连接/连续读取超时各 5 秒，按上述音频大小上限流式读取；
+不携带 Native Token、Cookie 或环境代理，也不接受压缩传输。
 
 ### 图片识别
 

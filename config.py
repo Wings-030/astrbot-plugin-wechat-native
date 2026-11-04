@@ -8,6 +8,9 @@ PLUGIN_ID = "astrbot_plugin_wechat_native"
 ADAPTER_ID = "wechat_native"
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_VOICE_BYTES = 25 * 1024 * 1024 - 17
+MAX_VOICE_SECONDS = 300
+VOICE_SEND_TIMEOUT = 25 * 60
 MAX_PDF_BYTES = 20 * 1024 * 1024
 MAX_PDF_PAGES = 50
 MAX_PDF_TEXT_CHARS = 32000
@@ -19,6 +22,8 @@ RECENT_GROUP_IMAGE_SECONDS = 120
 MAX_RECENT_GROUP_IMAGES = 256
 RECENT_GROUP_PDF_SECONDS = 120
 MAX_RECENT_GROUP_PDFS = 256
+RECENT_GROUP_VOICE_SECONDS = 120
+MAX_RECENT_GROUP_VOICES = 256
 
 DEFAULT_CONFIG = {
     "id": "wechat_native",
@@ -65,10 +70,10 @@ CONFIG_METADATA = {
     "enable_private_reply": {"type": "bool", "description": "启用私聊回复"},
     "enable_media": {
         "type": "bool",
-        "description": "启用图片与 PDF 识别",
+        "description": "启用图片、PDF 与语音识别",
         "hint": (
-            "支持私聊图片识别与 PDF 解析；"
-            "群聊可引用图片或 PDF 并 @机器人，或发送后在2分钟内 @机器人解析。"
+            "支持私聊图片、PDF 与语音，语音使用 AstrBot 配置的 ASR；"
+            "群聊可引用媒体并 @机器人，或发送后在2分钟内 @机器人解析。"
         ),
     },
     "allowed_users": {
@@ -80,7 +85,7 @@ CONFIG_METADATA = {
         "type": "string",
         "description": "群聊触发模式",
         "options": ["mention", "all", "disabled"],
-        "hint": "mention：明确 @自己；all：所有文本；disabled：关闭",
+        "hint": "mention：明确 @自己；all：所有文本与直接语音；disabled：关闭",
     },
     "allowed_groups": {
         "type": "list",

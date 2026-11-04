@@ -12,7 +12,7 @@ from pathlib import Path
 
 from astrbot.api import logger
 from astrbot.api.event import MessageChain
-from astrbot.api.message_components import Plain
+from astrbot.api.message_components import Plain, Record
 from astrbot.api.platform import Platform, PlatformMetadata, register_platform_adapter
 from astrbot.api.star import StarTools
 
@@ -23,9 +23,11 @@ from .config import (
     MAX_CONCURRENT_MEDIA_TASKS,
     MAX_RECENT_GROUP_IMAGES,
     MAX_RECENT_GROUP_PDFS,
+    MAX_RECENT_GROUP_VOICES,
     PLUGIN_ID,
     RECENT_GROUP_IMAGE_SECONDS,
     RECENT_GROUP_PDF_SECONDS,
+    RECENT_GROUP_VOICE_SECONDS,
     NativeConfig,
 )
 from .event import (
@@ -45,6 +47,7 @@ from .native_client import (
     extract_pdf_text,
     is_pdf_filename,
     load_outgoing_image,
+    load_outgoing_voice,
 )
 from .state import StateStore, cursor_number
 from .summary import GroupSummaryCache, is_summary_command
@@ -90,6 +93,7 @@ class WeChatNativeAdapter(Platform):
         self._media_semaphore = asyncio.Semaphore(MAX_CONCURRENT_MEDIA_TASKS)
         self._recent_group_images = OrderedDict()
         self._recent_group_pdfs = OrderedDict()
+        self._recent_group_voices = OrderedDict()
         self._events = weakref.WeakValueDictionary()
         self._send_lock = asyncio.Lock()
         self._terminate_lock = asyncio.Lock()
@@ -142,12 +146,14 @@ class WeChatNativeAdapter(Platform):
         cfg = self.native_config
         msg_type = raw.get("type")
         is_direct_image = msg_type == 3
+        is_direct_voice = msg_type == 34
         # Native exposes a file's name only through its media asset, so a direct
         # file is only a candidate here; non-PDF files are dropped after that lookup.
         is_direct_file = msg_type == 49 and raw.get("appMessageType") == 6
         is_quote = msg_type == 49 and raw.get("appMessageType") == 57
         quote = raw.get("quote")
         is_quoted_image = is_quote and isinstance(quote, dict) and quote.get("type") == 3
+        is_quoted_voice = is_quote and isinstance(quote, dict) and quote.get("type") == 34
         # Native reports the quoted file's title as embeddedText (state is "unsupported").
         is_quoted_pdf = (
             is_quote
@@ -158,7 +164,7 @@ class WeChatNativeAdapter(Platform):
         )
         body = raw.get("body")
         has_text_body = isinstance(body, str) and bool(body.strip())
-        if is_direct_image:
+        if is_direct_image or is_direct_voice:
             if not cfg.enable_media:
                 return ignored("media_disabled")
             if body is not None and not isinstance(body, str):
@@ -180,7 +186,12 @@ class WeChatNativeAdapter(Platform):
             if cfg.allowed_users and raw["senderId"] not in cfg.allowed_users:
                 return ignored("user_not_allowed")
             if cfg.enable_media and (
-                is_direct_image or is_quoted_image or is_direct_file or is_quoted_pdf
+                is_direct_image
+                or is_quoted_image
+                or is_direct_file
+                or is_quoted_pdf
+                or is_direct_voice
+                or is_quoted_voice
             ):
                 return "media"
             return "text" if has_text_body else ignored("empty_text_body")
@@ -202,7 +213,13 @@ class WeChatNativeAdapter(Platform):
             stripped = re.sub(r"^(?:@[^\u2005\r\n]+\u2005[ \t]*)+", "", body)
             if is_summary_command(stripped):
                 return "text"
-        if cfg.enable_media and (is_quoted_image or is_quoted_pdf):
+        if is_direct_voice:
+            return (
+                "media"
+                if cfg.group_reply_mode == "all" or mentioned
+                else ignored("voice_without_mention")
+            )
+        if cfg.enable_media and (is_quoted_image or is_quoted_pdf or is_quoted_voice):
             return "media" if mentioned else ignored("quoted_media_without_mention")
         if cfg.group_reply_mode == "all" or mentioned:
             return "text"
@@ -238,12 +255,15 @@ class WeChatNativeAdapter(Platform):
         return cfg.enable_group_summary
 
     def _remember_group_image(self, raw: dict, origin: str) -> None:
-        """Remember a group member's latest image or file for a following @ request."""
+        """Remember a group member's latest media ID for a following @ request."""
         cfg = self.native_config
         thread, sender = raw["threadId"], raw.get("senderId")
         if raw.get("type") == 3:
             store, maximum = self._recent_group_images, MAX_RECENT_GROUP_IMAGES
             seconds = RECENT_GROUP_IMAGE_SECONDS
+        elif raw.get("type") == 34:
+            store, maximum = self._recent_group_voices, MAX_RECENT_GROUP_VOICES
+            seconds = RECENT_GROUP_VOICE_SECONDS
         elif raw.get("type") == 49 and raw.get("appMessageType") == 6:
             store, maximum = self._recent_group_pdfs, MAX_RECENT_GROUP_PDFS
             seconds = RECENT_GROUP_PDF_SECONDS
@@ -282,7 +302,7 @@ class WeChatNativeAdapter(Platform):
             store.popitem(last=False)
 
     def _recent_media_request(self, raw: dict, prompt: str) -> tuple[str | None, dict | None]:
-        """Return ("image" | "pdf", source) when an @ text asks about a recent attachment."""
+        """Return the requested media kind and same-sender recent source for an @ text."""
         mentions = raw.get("mentions")
         if (
             not self.native_config.enable_media
@@ -299,6 +319,7 @@ class WeChatNativeAdapter(Platform):
         for name, store, seconds in (
             ("image", self._recent_group_images, RECENT_GROUP_IMAGE_SECONDS),
             ("pdf", self._recent_group_pdfs, RECENT_GROUP_PDF_SECONDS),
+            ("voice", self._recent_group_voices, RECENT_GROUP_VOICE_SECONDS),
         ):
             source = store.get(key)
             if source and time.time() - source["timestamp"] > seconds:
@@ -313,7 +334,12 @@ class WeChatNativeAdapter(Platform):
         file_asked = bool(re.search(r"(?i)pdf", prompt)) or (
             sources["pdf"] is not None and bool(re.search(r"文件|文档|论文|这份|那份", prompt))
         )
-        wanted = [name for name, asked in (("image", image_asked), ("pdf", file_asked)) if asked]
+        voice_asked = bool(re.search(r"语音|录音|音频|听听|听一下", prompt))
+        wanted = [
+            name
+            for name, asked in (("image", image_asked), ("pdf", file_asked), ("voice", voice_asked))
+            if asked
+        ]
         if not wanted:
             present = [name for name, source in sources.items() if source]
             if prompt.strip() or not present:
@@ -331,7 +357,8 @@ class WeChatNativeAdapter(Platform):
     async def _check_quote_original(
         self, raw: dict, wrapped: WeChatNativeEvent, original_id: str
     ) -> None:
-        pdf = wrapped.get_extra("wechat_native_media_kind") == "pdf"
+        media_kind = wrapped.get_extra("wechat_native_media_kind") or "image"
+        pdf = media_kind == "pdf"
         quote = wrapped.get_extra("wechat_native_recent_image") or raw["quote"]
         original = await self.client.message(original_id)
         if (
@@ -340,10 +367,10 @@ class WeChatNativeAdapter(Platform):
             or original.get("threadId") != raw["threadId"]
             or original.get("serverId") != quote["serverId"]
             or original.get("senderId") != quote["senderId"]
-            or original.get("type") != (49 if pdf else 3)
+            or original.get("type") != {"pdf": 49, "image": 3, "voice": 34}[media_kind]
             or (pdf and original.get("appMessageType") != 6)
         ):
-            raise MediaError("unavailable", media_kind="pdf" if pdf else "image")
+            raise MediaError("unavailable", media_kind=media_kind)
         if (
             original.get("recall") is not None
             or self.state.message_status(original_id) == "recalled"
@@ -376,13 +403,15 @@ class WeChatNativeAdapter(Platform):
             guard()
             await self._check_quote_original(raw, wrapped, original_id)
             guard()
-            if not recent and not pdf:
+            if not recent and media_kind == "image":
                 logger.warning(
                     "WeChat Native 引用媒体元数据无效，回退同聊天原图：message=%s original=%s",
                     raw["id"],
                     original_id,
                 )
-            if pdf:
+            if media_kind == "voice":
+                payload = await self.client.fetch_voice(original_id, guard=guard)
+            elif pdf:
                 payload = await self.client.fetch_pdf(original_id, guard=guard)
             else:
                 payload = await self.client.fetch_image(original_id, guard=guard)
@@ -415,7 +444,7 @@ class WeChatNativeAdapter(Platform):
             )
             or current_quote.get("state") == "recalled"
         )
-        if not pdf:
+        if media_kind == "image":
             # Native embeds the image itself; a quote of a file is always "unsupported".
             quote_changed = (
                 quote_changed
@@ -438,7 +467,8 @@ class WeChatNativeAdapter(Platform):
         is_quote = raw.get("type") == 49 and raw.get("appMessageType") == 57
         media_kind = wrapped.get_extra("wechat_native_media_kind") or "image"
         is_pdf = media_kind == "pdf"
-        label = "PDF" if is_pdf else "图片"
+        is_voice = media_kind == "voice"
+        label = {"pdf": "PDF", "voice": "语音", "image": "图片"}[media_kind]
         recent_request = wrapped.get_extra("wechat_native_recent_image_request")
 
         def guard() -> None:
@@ -461,7 +491,10 @@ class WeChatNativeAdapter(Platform):
                     raise MediaError("recent_unavailable", media_kind=media_kind)
                 if is_quote:
                     quote = raw.get("quote")
-                    if not isinstance(quote, dict) or quote.get("type") != (49 if is_pdf else 3):
+                    if (
+                        not isinstance(quote, dict)
+                        or quote.get("type") != {"pdf": 49, "voice": 34, "image": 3}[media_kind]
+                    ):
                         raise MediaError("unavailable", media_kind=media_kind)
                     state = quote.get("state")
                     logger.debug(
@@ -479,16 +512,32 @@ class WeChatNativeAdapter(Platform):
                         ):
                             self.state.mark_message(message_id, "no_reply")
                         return
-                    if not is_pdf and state == "unsupported":
+                    if media_kind == "image" and state == "unsupported":
                         raise MediaError("unsupported_format")
-                    if not is_pdf and (
+                    if media_kind == "image" and (
                         state != "embedded" or quote.get("embeddedImage") is not True
                     ):
                         raise MediaError("expired")
-                image_bytes = pdf_name = pdf_text = None
+                image_bytes = pdf_name = pdf_text = voice_bytes = None
                 try:
                     async with asyncio.timeout(self.client.media_timeout):
-                        if is_pdf:
+                        if is_voice:
+                            if is_quote or recent_request:
+                                voice_bytes = await self._fetch_quote_original(
+                                    raw, wrapped, guard, "voice"
+                                )
+                            else:
+                                voice_bytes = await self.client.fetch_voice(message_id, guard=guard)
+                            latest = await self.client.message(message_id)
+                            guard()
+                            if any(
+                                latest.get(key) != raw.get(key)
+                                for key in ("id", "accountId", "threadId", "serverId")
+                            ):
+                                raise MediaError("unavailable", media_kind="voice")
+                            if latest.get("recall") is not None:
+                                raise MediaError("recalled", media_kind="voice")
+                        elif is_pdf:
                             if is_quote or recent_request:
                                 pdf_data, pdf_name = await self._fetch_quote_original(
                                     raw, wrapped, guard, "pdf"
@@ -516,7 +565,9 @@ class WeChatNativeAdapter(Platform):
                 except TimeoutError:
                     raise MediaError("unavailable", media_kind=media_kind) from None
                 guard()
-                payload_size = len(pdf_text) if is_pdf else len(image_bytes)
+                payload_size = (
+                    len(pdf_text) if is_pdf else len(voice_bytes if is_voice else image_bytes)
+                )
                 logger.debug(
                     "WeChat Native %s处理完成：message=%s size=%s", label, message_id, payload_size
                 )
@@ -526,6 +577,7 @@ class WeChatNativeAdapter(Platform):
                     self.bot_self_id,
                     image_bytes=image_bytes,
                     pdf_name=pdf_name,
+                    voice_bytes=voice_bytes,
                 )
                 event = WeChatNativeEvent(enriched, self)
                 event.set_extra("wechat_native_media_kind", media_kind)
@@ -683,7 +735,11 @@ class WeChatNativeAdapter(Platform):
                 raise ValueError("invalid_recall_identity")
             self.state.recall(thread, server_id, message_id)
             self.summary_cache.recall(thread, server_id)
-            for store in (self._recent_group_images, self._recent_group_pdfs):
+            for store in (
+                self._recent_group_images,
+                self._recent_group_pdfs,
+                self._recent_group_voices,
+            ):
                 for key, source in list(store.items()):
                     if key[0] == thread and source["serverId"] == server_id:
                         store.pop(key)
@@ -792,7 +848,10 @@ class WeChatNativeAdapter(Platform):
                 "wechat_native_media_kind",
                 recent_kind
                 or (
-                    "pdf"
+                    "voice"
+                    if raw.get("type") == 34
+                    or (isinstance(quote, dict) and quote.get("type") == 34)
+                    else "pdf"
                     if raw.get("type") == 49
                     and (
                         raw.get("appMessageType") == 6
@@ -1066,7 +1125,10 @@ class WeChatNativeAdapter(Platform):
                     # Resolve each image with bounded memory, before recording an intent.
                     # No later component is attempted after a failure or unknown outcome.
                     if not isinstance(part, str):
-                        data, content_type = await load_outgoing_image(part)
+                        loader = (
+                            load_outgoing_voice if isinstance(part, Record) else load_outgoing_image
+                        )
+                        data, content_type = await loader(part)
                     key = "astrbot-" + uuid.uuid4().hex
                     self.state.begin_send(key, message_id, thread)
                     logger.debug(
@@ -1080,6 +1142,18 @@ class WeChatNativeAdapter(Platform):
                                 thread, part, key, mentions, quote=quote
                             )
                             mentions, quote = None, None
+                        elif isinstance(part, Record):
+                            receipt = await self.client.send_voice(
+                                thread,
+                                data,
+                                content_type,
+                                key,
+                                record_job=lambda job_id: self.state.record_send_id(key, job_id),
+                                before_send=check_current_source,
+                                record_chunks=lambda chunks: self.state.record_voice_chunks(
+                                    key, chunks
+                                ),
+                            )
                         else:
                             receipt = await self.client.send_image(
                                 thread,
@@ -1107,7 +1181,14 @@ class WeChatNativeAdapter(Platform):
                         self.state.finish_send(key, state, send_id)
                         if message_id:
                             self.state.mark_message(
-                                message_id, "failed" if state == "cancelled" else state
+                                message_id,
+                                "partial"
+                                if any(
+                                    c["state"] == "accepted" for c in self.state.voice_chunks(key)
+                                )
+                                else "failed"
+                                if state == "cancelled"
+                                else state,
                             )
                         logger.error(
                             "WeChat Native 回复未确认；状态 %s，回执键 %s。"
@@ -1156,6 +1237,7 @@ class WeChatNativeAdapter(Platform):
         self.summary_cache.clear()
         self._recent_group_images.clear()
         self._recent_group_pdfs.clear()
+        self._recent_group_voices.clear()
         await self.client.close()
         self.state.close()
         self._state_closed = True

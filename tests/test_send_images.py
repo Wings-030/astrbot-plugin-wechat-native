@@ -5,7 +5,6 @@ import base64
 import hashlib
 import io
 from types import SimpleNamespace
-from urllib.parse import urlsplit
 
 import aiohttp
 import pytest
@@ -129,32 +128,6 @@ async def image_adapter(serve, tmp_path, *, thread="peer", outcome="accepted", f
     converted = module("event").convert_message(msg, adapter.native_config, "bot")
     event = module("event").WeChatNativeEvent(converted, adapter)
     return adapter, event, requests, uploads, posts, jobs
-
-
-@pytest.fixture
-def public_image_url(serve, monkeypatch):
-    async def start(handler):
-        url = await serve(handler)
-        port = urlsplit(url).port
-
-        async def resolve(self, host, port=0, family=0):
-            # Route a public-name test URL to the isolated mock server only.
-            return [
-                {
-                    "hostname": host,
-                    "host": "127.0.0.1",
-                    "port": urlsplit(url).port,
-                    "family": 2,
-                    "proto": 0,
-                    "flags": 0,
-                }
-            ]
-
-        assert port
-        monkeypatch.setattr(module("native_client")._PublicImageResolver, "resolve", resolve)
-        return "https://public.example/image".replace("https:", "http:")
-
-    return start
 
 
 @pytest.mark.parametrize(
@@ -364,7 +337,7 @@ async def test_unsafe_url_rejected(url):
 )
 async def test_dns_answers_checked_at_connection(monkeypatch, addresses):
     native = module("native_client")
-    resolver = native._PublicImageResolver()
+    resolver = native._PublicMediaResolver()
 
     async def resolve(*args):
         return [{"host": address} for address in addresses]
@@ -571,5 +544,5 @@ async def test_oversized_local_file_rejected(tmp_path):
     path = tmp_path / "large.jpg"
     with path.open("wb") as stream:
         stream.truncate(10 * 1024 * 1024 + 1)
-    with pytest.raises(ValueError, match="10 MiB"):
+    with pytest.raises(ValueError, match="大小限制"):
         await module("native_client").load_outgoing_image(Image.fromFileSystem(path))
