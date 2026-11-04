@@ -403,8 +403,6 @@ def test_plugin_registers_config_in_real_astrbot():
 
 
 async def test_platform_icon_is_served_through_astrbot_file_api():
-    import xml.etree.ElementTree as ET
-
     import httpx
     from astrbot.core.platform.register import platform_registry
     from astrbot.dashboard.api.files import router
@@ -430,8 +428,8 @@ async def test_platform_icon_is_served_through_astrbot_file_api():
         for _ in range(2):  # The list and editor must both be able to fetch the icon.
             response = await client.get(f"/api/v1/files/tokens/{token}")
             assert response.status_code == 200
-            assert response.headers["content-type"].startswith("image/svg+xml")
-            assert ET.fromstring(response.content).tag == "{http://www.w3.org/2000/svg}svg"
+            assert response.headers["content-type"].startswith("image/png")
+            assert response.content.startswith(b"\x89PNG\r\n\x1a\n")
 
 
 async def test_startup_retries_and_preserves_framework_instance_identity(serve, tmp_path):

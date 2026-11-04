@@ -58,7 +58,7 @@ from .summary import GroupSummaryCache, is_summary_command
     "直接连接 agent-wechat-native 的个人微信平台适配器",
     default_config_tmpl=DEFAULT_CONFIG.copy(),
     adapter_display_name="WeChat Native",
-    logo_path="logo.svg",
+    logo_path="logo.png",
     support_streaming_message=False,
     config_metadata=CONFIG_METADATA,
 )
