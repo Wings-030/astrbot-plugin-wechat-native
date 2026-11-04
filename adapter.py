@@ -216,12 +216,12 @@ class WeChatNativeAdapter(Platform):
         if is_direct_voice:
             return (
                 "media"
-                if cfg.group_reply_mode == "all" or mentioned
+                if cfg.group_reply_mode in {"all", "probability"} or mentioned
                 else ignored("voice_without_mention")
             )
         if cfg.enable_media and (is_quoted_image or is_quoted_pdf or is_quoted_voice):
             return "media" if mentioned else ignored("quoted_media_without_mention")
-        if cfg.group_reply_mode == "all" or mentioned:
+        if cfg.group_reply_mode in {"all", "probability"} or mentioned:
             return "text"
         return ignored("group_without_mention")
 

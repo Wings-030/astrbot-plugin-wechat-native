@@ -87,12 +87,13 @@ def convert_message(
     if voice_bytes is not None and raw.get("type") == 34:
         text = ""  # Native voice metadata is not the user's transcript; AstrBot ASR fills it.
     mentions = raw.get("mentions")
-    if (
+    mentioned = (
         group
         and isinstance(mentions, dict)
         and mentions.get("state") == "known"
         and mentions.get("self") is True
-    ):
+    )
+    if mentioned:
         # WeChat terminates visible mention labels with U+2005. Keep the raw
         # body intact, and never treat an ordinary typed @name as metadata.
         text = re.sub(r"^(?:@[^\u2005\r\n]+\u2005[ \t]*)+", "", text)
@@ -102,9 +103,11 @@ def convert_message(
         text = DEFAULT_PDF_PROMPT
     result.message_str = text
     result.message = []
-    # In all mode this is an explicit policy wake marker, not evidence of a real @.
-    # The unmodified Native mentions remain available in raw_message.
-    if group:
+    # "all" mode injects a policy wake marker for every group message. Other
+    # modes only inject it for real mentions, so non-@ messages reach AstrBot
+    # without is_at_or_wake_command and can go through its proactive reply
+    # probability instead of being treated as an explicit wake.
+    if group and (mentioned or getattr(config, "group_reply_mode", "mention") == "all"):
         result.message.append(At(qq=self_id))
     quote = raw.get("quote")
     if raw.get("type") == 49 and raw.get("appMessageType") == 57 and isinstance(quote, dict):

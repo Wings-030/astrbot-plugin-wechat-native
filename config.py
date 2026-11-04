@@ -85,8 +85,13 @@ CONFIG_METADATA = {
     "group_reply_mode": {
         "type": "string",
         "description": "群聊触发模式",
-        "options": ["mention", "all", "disabled"],
-        "hint": "mention：明确 @自己；all：所有文本与直接语音；disabled：关闭",
+        "options": ["mention", "all", "probability", "disabled"],
+        "labels": ["仅 @", "全部回复", "概率回复", "关闭"],
+        "hint": (
+            "mention：明确 @自己；all：所有文本与直接语音都直接唤醒；"
+            "probability：所有文本与直接语音都进入 AstrBot，但只有 @ 才唤醒，"
+            "其余交给 AstrBot 的主动回复概率；disabled：关闭"
+        ),
     },
     "group_reply_style": {
         "type": "string",
@@ -161,8 +166,8 @@ class NativeConfig:
         if not isinstance(account, str) or not account.strip():
             raise ValueError("account_id 必填")
         mode = data.get("group_reply_mode", "mention")
-        if mode not in {"mention", "all", "disabled"}:
-            raise ValueError("group_reply_mode 必须为 mention/all/disabled")
+        if mode not in {"mention", "all", "probability", "disabled"}:
+            raise ValueError("group_reply_mode 必须为 mention/all/probability/disabled")
         style = data.get("group_reply_style", "mention")
         if not isinstance(style, str) or style not in {"mention", "quote", "plain"}:
             raise ValueError("group_reply_style 必须为 mention/quote/plain")
