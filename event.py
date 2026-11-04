@@ -139,12 +139,25 @@ def convert_message(
     return result
 
 
-def serialize_text(chain: MessageChain, *, group: bool) -> tuple[str, dict | None, str | None]:
-    text, users, all_members = [], [], False
+def serialize_chain(
+    chain: MessageChain, *, group: bool
+) -> tuple[list[str | Image], dict | None, str | None]:
+    """Keep images between contiguous text runs; metadata belongs to the first text run."""
+    parts, text, users, all_members = [], [], [], False
     reply_id = None
+
+    def flush_text():
+        value = "".join(text)
+        if value.strip():
+            parts.append(value)
+        text.clear()
+
     for component in chain.chain:
         if isinstance(component, Plain):
             text.append(component.text)
+        elif isinstance(component, Image):
+            flush_text()
+            parts.append(component)
         elif isinstance(component, At):
             user = str(component.qq)
             if user == "all":
@@ -159,13 +172,23 @@ def serialize_text(chain: MessageChain, *, group: bool) -> tuple[str, dict | Non
                 raise ValueError("Native 引用回复需要且只能指定一条原消息")
             reply_id = target
         else:
-            raise ValueError("WeChat Native 首版仅支持文本和群 @，请关闭文本转图片")
+            raise ValueError("WeChat Native 仅支持发送文本、图片、引用和群 @")
+    flush_text()
     if (users or all_members) and not group:
         users, all_members = [], False
     if users and all_members:
         raise ValueError("不能同时 @个人和 @全体")
     mentions = {"all": True} if all_members else {"userIds": users} if users else None
-    return "".join(text), mentions, reply_id
+    if parts and not any(isinstance(part, str) for part in parts) and (mentions or reply_id):
+        raise ValueError("Native 图片接口不支持引用或 @，请在消息链中添加文本承载这些信息")
+    return parts, mentions, reply_id
+
+
+def serialize_text(chain: MessageChain, *, group: bool) -> tuple[str, dict | None, str | None]:
+    parts, mentions, reply_id = serialize_chain(chain, group=group)
+    if any(not isinstance(part, str) for part in parts):
+        raise ValueError("图片消息需要通过 send_chain 发送")
+    return "".join(parts), mentions, reply_id
 
 
 class WeChatNativeEvent(AstrMessageEvent):

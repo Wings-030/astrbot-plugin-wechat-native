@@ -32,7 +32,7 @@ from .event import (
     WeChatNativeEvent,
     convert_message,
     message_timestamp,
-    serialize_text,
+    serialize_chain,
     session_target,
 )
 from .native_client import (
@@ -44,6 +44,7 @@ from .native_client import (
     SendError,
     extract_pdf_text,
     is_pdf_filename,
+    load_outgoing_image,
 )
 from .state import StateStore, cursor_number
 from .summary import GroupSummaryCache, is_summary_command
@@ -867,13 +868,21 @@ class WeChatNativeAdapter(Platform):
                 if event and event.get_extra("wechat_native_quote_invalidated"):
                     event.stop_event()
                     return False
-                text, mentions, reply_id = serialize_text(chain, group=thread.endswith("@chatroom"))
-                if not text.strip():
+                parts, mentions, reply_id = serialize_chain(
+                    chain, group=thread.endswith("@chatroom")
+                )
+                if not parts:
                     return False
-                if len(text.encode()) > 65536:
-                    raise ValueError("Native 文本超过 64 KiB，未发送")
-                if reply_id is not None and len(text.encode()) > 16384:
-                    raise ValueError("Native 引用回复文本超过 16 KiB，未发送")
+                for part in parts:
+                    if isinstance(part, str) and len(part.encode()) > 65536:
+                        raise ValueError("Native 文本超过 64 KiB，未发送")
+                    if (
+                        isinstance(part, str)
+                        and reply_id is not None
+                        and len(part.encode()) > 16384
+                    ):
+                        raise ValueError("Native 引用回复文本超过 16 KiB，未发送")
+                has_text = any(isinstance(part, str) for part in parts)
                 if self.client.closed:
                     raise ValueError("Native 客户端未连接，未提交发送")
                 message_id = source["id"] if source else None
@@ -889,6 +898,7 @@ class WeChatNativeAdapter(Platform):
                     if (
                         thread.endswith("@chatroom")
                         and mentions is None
+                        and has_text
                         and source_status != "replied"
                     ):
                         mentions = {"userIds": [source["senderId"]]}
@@ -994,39 +1004,126 @@ class WeChatNativeAdapter(Platform):
                     self.state.mark_message(message_id, "no_reply")
                     event.stop_event()
                     return False
-                key = "astrbot-" + uuid.uuid4().hex
-                self.state.begin_send(key, message_id, thread)
-                logger.debug(
-                    "WeChat Native 开始发送回复：message=%s receipt_key=%s", message_id, key
-                )
-                try:
-                    receipt = await self.client.send_text(thread, text, key, mentions, quote=quote)
-                except BaseException as error:
-                    state = "needs_review"
-                    if isinstance(error, SendError) and error.state in {"failed", "cancelled"}:
-                        state = error.state
-                    elif isinstance(error, NativeAPIError) and 400 <= error.status < 500:
-                        state = "failed"
-                    send_id = error.send_id if isinstance(error, SendError) else None
-                    self.state.finish_send(key, state, send_id)
-                    if message_id:
-                        self.state.mark_message(
-                            message_id, "failed" if state == "cancelled" else state
+
+                async def check_current_source():
+                    # Downloads/uploads can overlap recalls; recheck before every submission.
+                    if self.stopped:
+                        raise RuntimeError("WeChat Native 已停止")
+                    if source:
+                        status = self.state.message_status(message_id)
+                        if status in {"needs_review", "failed", "partial", "recalled"}:
+                            raise ValueError("回复来源已撤回或需人工检查，未提交发送")
+                        latest = await self.client.message(message_id)
+                        if self.state.message_status(message_id) in {
+                            "needs_review",
+                            "failed",
+                            "partial",
+                            "recalled",
+                        }:
+                            raise ValueError("回复来源已撤回或需人工检查，未提交发送")
+                        if (
+                            latest.get("id") != message_id
+                            or latest.get("accountId") != self.native_config.account_id
+                            or latest.get("threadId") != thread
+                            or latest.get("serverId") != source.get("serverId")
+                        ):
+                            raise ValueError("reply_source_identity_mismatch")
+                        if latest.get("recall") is not None:
+                            self.state.recall(thread, source.get("serverId"), message_id)
+                            if event:
+                                event.stop_event()
+                            raise ValueError("回复来源已撤回，未提交发送")
+                        original_quote = source.get("quote")
+                        latest_quote = latest.get("quote")
+                        if isinstance(original_quote, dict) and (
+                            not isinstance(latest_quote, dict)
+                            or latest_quote.get("serverId") != original_quote.get("serverId")
+                            or latest_quote.get("state") == "recalled"
+                        ):
+                            raise ValueError("引用来源已变化或撤回，未提交发送")
+                        original_id = (
+                            event.get_extra("wechat_native_quote_original_id") if event else None
                         )
-                    logger.error(
-                        "WeChat Native 回复未确认；状态 %s，回执键 %s。请检查状态库，勿盲目重发",
-                        state,
-                        key,
+                        if original_id:
+                            await self._check_quote_original(source, event, original_id)
+                    if event and event.get_extra("wechat_native_quote_invalidated"):
+                        raise ValueError("引用来源已失效，未提交发送")
+                    if records is not None and not self.summary_cache.contains(records):
+                        raise ValueError("摘要来源已失效，未提交发送")
+                    if quote:
+                        target = await self.client.message(quote["messageId"])
+                        if (
+                            target.get("id") != quote["messageId"]
+                            or target.get("accountId") != self.native_config.account_id
+                            or target.get("threadId") != thread
+                            or target.get("serverId") != quote["serverId"]
+                            or target.get("recall") is not None
+                            or self.state.message_status(quote["messageId"]) == "recalled"
+                        ):
+                            raise ValueError("Native 引用来源已失效，未提交发送")
+
+                for index, part in enumerate(parts):
+                    # Resolve each image with bounded memory, before recording an intent.
+                    # No later component is attempted after a failure or unknown outcome.
+                    if not isinstance(part, str):
+                        data, content_type = await load_outgoing_image(part)
+                    key = "astrbot-" + uuid.uuid4().hex
+                    self.state.begin_send(key, message_id, thread)
+                    logger.debug(
+                        "WeChat Native 开始发送回复：message=%s receipt_key=%s", message_id, key
                     )
-                    raise
-                self.state.finish_send(key, "accepted", receipt["id"])
-                if message_id:
-                    self.state.mark_message(message_id, "replied")
-                logger.info(
-                    "WeChat Native 回复已被 Native 接受：message=%s send=%s",
-                    message_id,
-                    receipt["id"],
-                )
+                    try:
+                        if index or not isinstance(part, str):
+                            await check_current_source()
+                        if isinstance(part, str):
+                            receipt = await self.client.send_text(
+                                thread, part, key, mentions, quote=quote
+                            )
+                            mentions, quote = None, None
+                        else:
+                            receipt = await self.client.send_image(
+                                thread,
+                                data,
+                                content_type,
+                                key,
+                                record_job=lambda job_id: self.state.record_send_id(key, job_id),
+                                before_send=check_current_source,
+                            )
+                    except BaseException as error:
+                        state = "needs_review"
+                        if isinstance(error, SendError) and error.state in {
+                            "failed",
+                            "cancelled",
+                            "partial",
+                        }:
+                            state = error.state
+                        elif isinstance(error, ValueError) or (
+                            isinstance(error, NativeAPIError)
+                            and 400 <= error.status < 500
+                            and error.status not in {408, 429}
+                        ):
+                            state = "failed"
+                        send_id = error.send_id if isinstance(error, SendError) else None
+                        self.state.finish_send(key, state, send_id)
+                        if message_id:
+                            self.state.mark_message(
+                                message_id, "failed" if state == "cancelled" else state
+                            )
+                        logger.error(
+                            "WeChat Native 回复未确认；状态 %s，回执键 %s。"
+                            "请检查状态库，勿盲目重发",
+                            state,
+                            key,
+                        )
+                        raise
+                    self.state.finish_send(key, "accepted", receipt["id"])
+                    if message_id:
+                        self.state.mark_message(message_id, "replied")
+                    logger.info(
+                        "WeChat Native 回复已被 Native 接受：message=%s send=%s",
+                        message_id,
+                        receipt["id"],
+                    )
                 return True
         finally:
             self._send_tasks.discard(task)

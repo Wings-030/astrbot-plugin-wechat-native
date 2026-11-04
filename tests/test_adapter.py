@@ -573,7 +573,7 @@ async def test_recall_arriving_during_source_read_blocks_submission(serve, tmp_p
         await adapter.terminate()
 
 
-async def test_unsupported_output_failure_is_retained_without_send(serve, tmp_path):
+async def test_invalid_image_output_failure_is_retained_without_send(serve, tmp_path):
     from astrbot.api.event import MessageChain
     from astrbot.api.message_components import Image
 
@@ -582,7 +582,7 @@ async def test_unsupported_output_failure_is_retained_without_send(serve, tmp_pa
         await adapter.process_native_event(native_event(msg))
         event = queue.get_nowait()
         with pytest.raises(ValueError):
-            await event.send(MessageChain([Image.fromURL("https://invalid.example/image.png")]))
+            await event.send(MessageChain([Image.fromBytes(b"invalid image")]))
         assert not sent
         assert adapter.state.message_status("m1") == "failed"
     finally:
@@ -825,7 +825,7 @@ async def test_later_validation_failure_keeps_partial_success_and_blocks_next_se
         event = queue.get_nowait()
         await event.send(MessageChain().message("first"))
         with pytest.raises(ValueError):
-            await event.send(MessageChain([Image.fromURL("https://invalid.example/image.png")]))
+            await event.send(MessageChain([Image.fromBytes(b"invalid image")]))
         assert adapter.state.message_status("m1") == "partial"
         assert adapter.state.send_record(sent[0][0])["state"] == "accepted"
         with pytest.raises(RuntimeError, match="人工检查"):

@@ -2,8 +2,8 @@
 
 让 AstrBot 通过 **agent-wechat-native /v1 API** 接入个人微信。插件装在 AstrBot 内，不需要额外 Bridge 服务。
 
-支持文本私聊、图片识别、群聊 @回复、群聊摘要、原生引用回复、白名单、独立会话、断线重连和持久化去重。
-暂不支持语音、文件收发及发送图片；请关闭该机器人的**文本转图片**功能。
+支持文本私聊、发送图片、图片识别、群聊 @回复、群聊摘要、原生引用回复、白名单、独立会话、断线重连和持久化去重。
+支持开启机器人的**文本转图片**功能；暂不支持语音及普通文件发送。
 
 适配版本：**AstrBot >=4.29.3,<5、Native v1.4.0**；插件运行需要 **Python 3.12+**。
 
@@ -48,6 +48,44 @@ Native Token 需要目标账号的 **read + send + media** 权限。本文 Compo
 手打 `@名字` 或仅 @全体不会触发默认群回复。分段回复仅首段自动 @原发送者，插件显式输出的 @仍保留。
 自动 @所需的群成员资料刷新失败时，会省略该自动 @并继续回复正文；显式 @仍需资料可用。
 AstrBot 的模型开关、全局白名单和插件权限仍需正确配置。
+
+### 支持发送图片
+
+AstrBot 的 `Image` 组件可发送到微信私聊和群聊，也支持通过已保存会话主动发送。
+可使用 `Image.fromBytes(data)`、`Image.fromFileSystem(path)`、`Image.fromURL(url)`、
+`Image.fromBase64(data)`、`Image.fromIO(stream)`，以及标准 `Image` 的本地路径、file URI、
+base64 data URI 或裸 base64 来源；`url` 字段优先于 `file`，与 AstrBot 的接口一致。
+支持 JPEG、PNG、GIF、WebP，**单张上限 10 MiB**；Native 负责后续图片处理，微信端显示效果需实际验证。
+
+文本和图片按消息链顺序逐段发送，多张图片逐张确认后再发送下一张。例如：
+
+```python
+from astrbot.api.event import MessageChain
+from astrbot.api.message_components import Image, Plain
+
+await event.send(MessageChain([
+    Plain("第一张图"),
+    Image.fromFileSystem("/app/data/example.jpg"),
+    Plain("第二张图"),
+    Image.fromBytes(image_bytes),
+]))
+```
+
+插件先通过 `POST /v1/accounts/{account}/uploads` 上传图片，再通过 `/sends` 提交
+`kind=image`、`sourceId` 和 `Idempotency-Key`，不会把图片作为普通文件发送。
+图片 job ID 会在轮询前保存到 SQLite。提交结果不明时只用原幂等键查询回执，
+后续只查询原 job；不会自动重新上传、重发或换键重试。
+失败、超时、断线、5xx 或未知状态会保留 `failed` / `needs_review` / `partial` 状态，
+停止发送消息链剩余部分；已发送部分不会回滚，需检查微信和状态库后人工处理。
+
+Native v1.4.0 的图片请求不接受引用和 @字段。混合消息链的显式引用、@和首段自动 @
+由第一段非空文本承载；纯图片回复不自动 @。纯图片链若显式包含 `Reply` 或群 @，
+需添加非空文本，否则插件在发送前报错。
+
+URL 图片仅允许公网 HTTP(S) 和 80/443 端口，不携带 Native Token、Cookie 或环境代理。
+连接时校验实际 DNS 地址，拒绝内网、环回、链路本地及其他非公网地址；最多跟随 3 次重定向，
+每一跳重新检查。下载总超时 15 秒、连接及连续读取超时各 5 秒，流式限制 10 MiB，
+拒绝压缩传输。内网图床请改为本地路径或 bytes 来源。
 
 ### 图片识别
 

@@ -145,8 +145,14 @@ class StateStore:
     def finish_send(self, key: str, state: str, send_id: str | None):
         with self.db:
             self.db.execute(
-                "UPDATE sends SET state=?, send_id=? WHERE key=?", (state, send_id, key)
+                "UPDATE sends SET state=?, send_id=COALESCE(?, send_id) WHERE key=?",
+                (state, send_id, key),
             )
+
+    def record_send_id(self, key: str, send_id: str):
+        """Retain an asynchronous media job before polling or process shutdown."""
+        with self.db:
+            self.db.execute("UPDATE sends SET send_id=? WHERE key=?", (send_id, key))
 
     def send_record(self, key: str) -> dict | None:
         row = self.db.execute("SELECT * FROM sends WHERE key=?", (key,)).fetchone()

@@ -1,12 +1,18 @@
-"""agent-wechat-native v1.3.3 /v1 transport; no AstrBot OpenAPI dependency."""
+"""agent-wechat-native v1.4.0 /v1 transport; no AstrBot OpenAPI dependency."""
 
 import asyncio
+import base64
+import binascii
 import hashlib
 import io
+import ipaddress
 import json
 import logging
-from collections.abc import AsyncIterator
-from urllib.parse import quote
+import socket
+from collections.abc import AsyncIterator, Awaitable, Callable
+from pathlib import Path
+from urllib.parse import quote, urljoin, urlsplit
+from urllib.request import url2pathname
 from uuid import UUID
 
 import aiohttp
@@ -378,6 +384,151 @@ def validate_image_bytes(data: bytes, *, max_bytes: int = MAX_IMAGE_BYTES) -> st
     if data.startswith((b"\x89PNG", b"GIF8")):
         raise MediaError("unavailable")
     raise MediaError("unsupported_format")
+
+
+def _public_image_address(host: str) -> None:
+    address = ipaddress.ip_address(host)
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    if not address.is_global or address.is_multicast or address.is_unspecified:
+        raise ValueError("图片 URL 只允许公网地址")
+
+
+class _PublicImageResolver(aiohttp.abc.AbstractResolver):
+    """Validate the actual connector DNS answers, avoiding a second DNS lookup."""
+
+    def __init__(self):
+        self.resolver = aiohttp.resolver.DefaultResolver()
+
+    async def resolve(self, host, port=0, family=socket.AF_INET):
+        results = await self.resolver.resolve(host, port, family)
+        if not results:
+            raise ValueError("图片 URL 无可用公网地址")
+        for result in results:
+            _public_image_address(result["host"])
+        return results
+
+    async def close(self):
+        await self.resolver.close()
+
+
+async def load_outgoing_image(image) -> tuple[bytes, str]:
+    """Resolve AstrBot Image references without its unbounded URL downloader."""
+    source = image.url or image.file or image.path
+    if not isinstance(source, str) or not source:
+        raise ValueError("图片来源为空")
+    try:
+        if source.lower().startswith(("http:", "https:")):
+            data = await _download_public_image(source)
+        elif source.startswith(("base64://", "data:")):
+            if source.startswith("data:"):
+                header, separator, encoded = source.partition(",")
+                if (
+                    not separator
+                    or not header.lower().startswith("data:image/")
+                    or not header.lower().endswith(";base64")
+                ):
+                    raise ValueError("图片 data URI 必须使用 image MIME 和 base64")
+            else:
+                encoded = source[len("base64://") :]
+            data = _decode_image_base64(encoded)
+        else:
+            if source.lower().startswith("file:"):
+                uri = urlsplit(source)
+                if uri.netloc or uri.query or uri.fragment:
+                    raise ValueError("不支持网络文件图片路径")
+                source = url2pathname(uri.path)
+            elif "://" in source:
+                raise ValueError("图片 URL 只支持 HTTP(S)")
+            if source.startswith(("\\\\", "//")):
+                raise ValueError("不支持网络文件图片路径")
+            path = Path(source)
+            # AstrBot also accepts legacy bare base64; prefer an existing local path.
+            try:
+                local_file = len(source) < 4096 and await asyncio.to_thread(path.is_file)
+            except OSError:
+                local_file = False  # Long bare base64 can exceed an OS filename limit.
+            if local_file:
+                data = await asyncio.to_thread(_read_image_file, path)
+            else:
+                data = _decode_image_base64(source)
+        content_type = validate_image_bytes(data)
+        return bytes(data), content_type
+    except MediaError as error:
+        raise ValueError(f"发送图片校验失败：{error.reason}") from None
+    except (OSError, aiohttp.ClientError, TimeoutError, binascii.Error):
+        raise ValueError("发送图片读取失败或超时，未提交发送") from None
+
+
+def _decode_image_base64(encoded: str) -> bytes:
+    if len(encoded) > ((MAX_IMAGE_BYTES + 2) // 3) * 4 + 1024:
+        raise ValueError("发送图片超过 10 MiB")
+    compact = "".join(encoded.split())
+    return base64.b64decode(compact + "=" * (-len(compact) % 4), validate=True)
+
+
+def _read_image_file(path: Path) -> bytes:
+    if path.stat().st_size > MAX_IMAGE_BYTES:
+        raise ValueError("发送图片超过 10 MiB")
+    with path.open("rb") as stream:
+        return stream.read(MAX_IMAGE_BYTES + 1)
+
+
+async def _download_public_image(url: str) -> bytes:
+    resolver = _PublicImageResolver()
+    try:
+        async with (
+            aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(resolver=resolver, use_dns_cache=False),
+                timeout=aiohttp.ClientTimeout(total=15, connect=5, sock_read=5),
+                trust_env=False,
+                cookie_jar=aiohttp.DummyCookieJar(),
+                auto_decompress=False,
+            ) as session,
+            asyncio.timeout(15),
+        ):
+            for redirects in range(4):
+                parsed = urlsplit(url)
+                if (
+                    parsed.scheme not in {"http", "https"}
+                    or not parsed.hostname
+                    or parsed.username is not None
+                    or parsed.password is not None
+                    or parsed.port not in {None, 80, 443}
+                    or "\\" in url
+                    or any(ord(char) < 33 or ord(char) == 127 for char in url)
+                ):
+                    raise ValueError("图片 URL 协议、端口或格式不允许")
+                try:
+                    ipaddress.ip_address(parsed.hostname)
+                except ValueError:
+                    pass  # Hostnames are checked by the connector's resolver.
+                else:
+                    _public_image_address(parsed.hostname)
+                async with session.get(url, allow_redirects=False) as response:
+                    if response.status in {301, 302, 303, 307, 308}:
+                        location = response.headers.get("Location")
+                        if redirects == 3 or not location:
+                            raise ValueError("图片 URL 重定向过多或无效")
+                        url = urljoin(url, location)
+                        continue
+                    if response.status != 200:
+                        raise ValueError("图片 URL 下载失败")
+                    if response.headers.get("Content-Encoding", "identity").lower() != "identity":
+                        raise ValueError("图片 URL 不支持压缩传输")
+                    if (
+                        response.content_length is not None
+                        and response.content_length > MAX_IMAGE_BYTES
+                    ):
+                        raise ValueError("发送图片超过 10 MiB")
+                    data = bytearray()
+                    async for chunk in response.content.iter_chunked(65536):
+                        if len(data) + len(chunk) > MAX_IMAGE_BYTES:
+                            raise ValueError("发送图片超过 10 MiB")
+                        data.extend(chunk)
+                    return bytes(data)
+    finally:
+        await resolver.close()
 
 
 class NativeClient:
@@ -1130,6 +1281,103 @@ class NativeClient:
             "GET", self.prefix + "/sends/by-idempotency-key", params={"key": key}
         )
 
+    async def _submit_send(self, payload: dict, key: str) -> dict:
+        try:
+            return await self._request(
+                "POST", self.prefix + "/sends", json=payload, headers={"Idempotency-Key": key}
+            )
+        except NativeAPIError as error:
+            if 400 <= error.status < 500 and error.status not in {408, 429}:
+                raise
+            try:
+                return await self.send_by_key(key)
+            except NativeAPIError:
+                raise SendError("submission_unknown", key) from None
+
+    async def send_image(
+        self,
+        thread: str,
+        data: bytes,
+        content_type: str,
+        key: str,
+        *,
+        record_job: Callable[[str], None],
+        before_send: Callable[[], Awaitable[None]],
+    ) -> dict:
+        """Stage bytes, submit one image job, then read that job without resubmitting."""
+        suffix = {"image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp"}
+        if validate_image_bytes(data) != content_type:
+            raise ValueError("发送图片 MIME 与内容不匹配")
+        form = aiohttp.FormData()
+        form.add_field(
+            "file", data, filename="image." + suffix[content_type], content_type=content_type
+        )
+        source = await self._request("POST", self.prefix + "/uploads", data=form)
+        if (
+            not isinstance(source.get("id"), str)
+            or not source["id"]
+            or source.get("byteLength") != len(data)
+            or source.get("sha256") != hashlib.sha256(data).hexdigest()
+        ):
+            raise SendError("upload_identity_mismatch", key)
+        await before_send()
+        value = await self._submit_send(
+            {"threadId": thread, "kind": "image", "sourceId": source["id"]}, key
+        )
+        deadline = asyncio.get_running_loop().time() + self.send_timeout
+        job_id = None
+        server_id = None
+        while True:
+            if (
+                not isinstance(value.get("id"), str)
+                or not value["id"]
+                or (job_id is not None and value["id"] != job_id)
+                or value.get("accountId") != self.account_id
+                or value.get("threadId") != thread
+                or value.get("kind") != "send"
+                or value.get("sourceId") != source["id"]
+                or (server_id is not None and value.get("serverMessageId") != server_id)
+            ):
+                raise SendError("receipt_identity_mismatch", key, job_id)
+            if job_id is None:
+                job_id = value["id"]
+                record_job(job_id)
+            if value.get("serverMessageId") is not None:
+                server_id = value["serverMessageId"]
+            state = value.get("state")
+            if state in {"failed", "cancelled", "partial", "needs_review"}:
+                raise SendError(state, key, job_id)
+            if state in {"accepted", "completed", "succeeded"}:
+                result = value.get("result")
+                if isinstance(result, dict):
+                    if result.get("profileProjection") in {"unknown", "not_applicable"}:
+                        raise SendError("needs_review", key, job_id)
+                    ids = result.get("messageIds")
+                    if (
+                        isinstance(value.get("serverMessageId"), str)
+                        and value["serverMessageId"]
+                        and isinstance(ids, list)
+                        and len(ids) == 1
+                        and isinstance(ids[0], str)
+                        and ids[0]
+                    ):
+                        return value
+            elif state not in {"queued", "running", "submitting"}:
+                raise SendError("unknown", key, job_id)
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise SendError("status_unavailable", key, job_id)
+            try:
+                async with asyncio.timeout(remaining):
+                    await asyncio.sleep(min(self.poll_interval, remaining))
+                    value = await self.job(job_id)
+            except NativeAPIError as error:
+                if error.status in {0, 408, 429} or 500 <= error.status < 600:
+                    continue  # Retry reads only; the POST and upload are never repeated.
+                raise SendError("status_unavailable", key, job_id) from None
+            except TimeoutError:
+                raise SendError("status_unavailable", key, job_id) from None
+
     async def _group_members_present(self, thread: str, user_ids: list[str]) -> bool:
         for username in user_ids:
             try:
@@ -1230,17 +1478,7 @@ class NativeClient:
             payload["mentions"] = mentions
         if quote is not None:
             payload["quote"] = quote
-        try:
-            value = await self._request(
-                "POST", self.prefix + "/sends", json=payload, headers={"Idempotency-Key": key}
-            )
-        except NativeAPIError as error:
-            if 400 <= error.status < 500 and error.status not in {408, 429}:
-                raise
-            try:
-                value = await self.send_by_key(key)
-            except NativeAPIError:
-                raise SendError("submission_unknown", key) from None
+        value = await self._submit_send(payload, key)
         deadline = asyncio.get_running_loop().time() + self.send_timeout
         send_id = None
         poll_failed = False
