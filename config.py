@@ -66,7 +66,10 @@ CONFIG_METADATA = {
     "enable_media": {
         "type": "bool",
         "description": "启用图片与 PDF 识别",
-        "hint": "支持私聊图片识别与 PDF 解析；群聊可引用图片或 PDF 并 @机器人，或发送后在2分钟内 @机器人解析。",
+        "hint": (
+            "支持私聊图片识别与 PDF 解析；"
+            "群聊可引用图片或 PDF 并 @机器人，或发送后在2分钟内 @机器人解析。"
+        ),
     },
     "allowed_users": {
         "type": "list",
