@@ -37,6 +37,7 @@ DEFAULT_CONFIG = {
     "enable_media": True,
     "allowed_users": [],
     "group_reply_mode": "mention",
+    "group_reply_style": "mention",
     "allowed_groups": [],
     "unique_session": True,
     "enable_group_summary": False,
@@ -87,6 +88,13 @@ CONFIG_METADATA = {
         "options": ["mention", "all", "disabled"],
         "hint": "mention：明确 @自己；all：所有文本与直接语音；disabled：关闭",
     },
+    "group_reply_style": {
+        "type": "string",
+        "description": "群聊回复方式",
+        "options": ["mention", "quote", "plain"],
+        "labels": ["@触发者", "引用触发消息", "直接发送"],
+        "hint": "首段回复自动 @或引用，也可直接发送；纯图片/语音直接发送。插件显式添加的 @和引用仍保留。",
+    },
     "allowed_groups": {
         "type": "list",
         "description": "群白名单",
@@ -125,6 +133,7 @@ class NativeConfig:
     enable_media: bool = True
     allowed_users: frozenset[str] = frozenset()
     group_reply_mode: str = "mention"
+    group_reply_style: str = "mention"
     allowed_groups: frozenset[str] = frozenset()
     unique_session: bool = True
     enable_group_summary: bool = False
@@ -154,6 +163,9 @@ class NativeConfig:
         mode = data.get("group_reply_mode", "mention")
         if mode not in {"mention", "all", "disabled"}:
             raise ValueError("group_reply_mode 必须为 mention/all/disabled")
+        style = data.get("group_reply_style", "mention")
+        if not isinstance(style, str) or style not in {"mention", "quote", "plain"}:
+            raise ValueError("group_reply_style 必须为 mention/quote/plain")
         for key in (
             "enable_private_reply",
             "enable_media",
@@ -183,6 +195,7 @@ class NativeConfig:
             enable_private_reply=data.get("enable_private_reply", True),
             enable_media=data.get("enable_media", True),
             group_reply_mode=mode,
+            group_reply_style=style,
             unique_session=data.get("unique_session", True),
             enable_group_summary=data.get("enable_group_summary", False),
             summary_max_messages=data.get("summary_max_messages", 200),

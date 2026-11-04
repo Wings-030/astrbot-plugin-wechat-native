@@ -932,6 +932,16 @@ class WeChatNativeAdapter(Platform):
                 )
                 if not parts:
                     return False
+                has_text = any(isinstance(part, str) for part in parts)
+                if (
+                    source
+                    and thread.endswith("@chatroom")
+                    and has_text
+                    and self.native_config.group_reply_style == "quote"
+                    and reply_id is None
+                    and self.state.message_status(source["id"]) != "replied"
+                ):
+                    reply_id = source["id"]
                 for part in parts:
                     if isinstance(part, str) and len(part.encode()) > 65536:
                         raise ValueError("Native 文本超过 64 KiB，未发送")
@@ -941,7 +951,6 @@ class WeChatNativeAdapter(Platform):
                         and len(part.encode()) > 16384
                     ):
                         raise ValueError("Native 引用回复文本超过 16 KiB，未发送")
-                has_text = any(isinstance(part, str) for part in parts)
                 if self.client.closed:
                     raise ValueError("Native 客户端未连接，未提交发送")
                 message_id = source["id"] if source else None
@@ -956,6 +965,7 @@ class WeChatNativeAdapter(Platform):
                         return False
                     if (
                         thread.endswith("@chatroom")
+                        and self.native_config.group_reply_style == "mention"
                         and mentions is None
                         and has_text
                         and source_status != "replied"
