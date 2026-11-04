@@ -5,7 +5,7 @@
 支持文本私聊、图片识别、群聊 @回复、群聊摘要、原生引用回复、白名单、独立会话、断线重连和持久化去重。
 暂不支持语音、文件收发及发送图片；请关闭该机器人的**文本转图片**功能。
 
-适配版本：**AstrBot >=4.29.3,<5、Native v1.3.3**；插件运行需要 **Python 3.12+**。
+适配版本：**AstrBot >=4.29.3,<5、Native v1.4.0**；插件运行需要 **Python 3.12+**。
 
 ## 安装与配置
 
@@ -176,7 +176,7 @@ services:
         max-file: "3"
 
   agent-wechat:
-    image: ghcr.io/thisnick/agent-wechat-native:v1.3.3
+    image: ghcr.io/thisnick/agent-wechat-native:v1.4.0
     container_name: agent-wechat
     restart: unless-stopped
     network_mode: host
@@ -315,6 +315,6 @@ ruff format --check .
 
 - [AstrBot Docker 部署](https://docs.astrbot.app/deploy/astrbot/docker.html)
 - [Native Docker 部署](https://github.com/thisnick/agent-wechat/tree/v1.3.3/deploy/native)
-- [Native v1.3.3 API](https://github.com/thisnick/agent-wechat/blob/v1.3.3/docs/src/content/docs/use/api.mdx)
+- [Native v1.4.0 API](https://github.com/thisnick/agent-wechat/blob/v1.3.3/docs/src/content/docs/use/api.mdx)
 
 本插件采用 [MIT 许可证](LICENSE)。仅接入有权操作的微信账号。
