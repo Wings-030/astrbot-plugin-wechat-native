@@ -210,6 +210,11 @@ class WeChatNativeEvent(AstrMessageEvent):
     async def send(self, message: MessageChain) -> None:
         if self.adapter.stopped:
             raise RuntimeError("WeChat Native 已停止")
+        raw = (
+            self.message_obj.raw_message
+            if isinstance(self.message_obj.raw_message, dict)
+            else None
+        )
         status = self.adapter.state.message_status(self.message_obj.message_id)
         if status == "recalled":
             self.stop_event()
@@ -218,9 +223,14 @@ class WeChatNativeEvent(AstrMessageEvent):
             raise RuntimeError("此消息的回复需人工检查，禁止自动重发")
         try:
             sent = await self.adapter.send_chain(
-                self.message_obj.raw_message["threadId"],
+                raw["threadId"]
+                if raw
+                else session_target(
+                    self.message_obj.session_id,
+                    self.adapter.native_config.account_id,
+                ),
                 message,
-                source=self.message_obj.raw_message,
+                source=raw,
                 event=self,
             )
         except (Exception, asyncio.CancelledError) as error:
@@ -234,6 +244,8 @@ class WeChatNativeEvent(AstrMessageEvent):
                     )
             raise
         if sent:
+            if raw is None and status == "queued":
+                self.adapter.state.mark_message(self.message_obj.message_id, "replied")
             await super().send(message)
         elif self.adapter.state.message_status(self.message_obj.message_id) == "queued":
             self.adapter.state.mark_message(self.message_obj.message_id, "no_reply")

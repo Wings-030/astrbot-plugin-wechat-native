@@ -13,7 +13,12 @@ from pathlib import Path
 from astrbot.api import logger
 from astrbot.api.event import MessageChain
 from astrbot.api.message_components import Plain, Record
-from astrbot.api.platform import Platform, PlatformMetadata, register_platform_adapter
+from astrbot.api.platform import (
+    AstrBotMessage,
+    Platform,
+    PlatformMetadata,
+    register_platform_adapter,
+)
 from astrbot.api.star import StarTools
 
 from .config import (
@@ -108,6 +113,13 @@ class WeChatNativeAdapter(Platform):
             adapter_display_name="WeChat Native",
             support_streaming_message=False,
         )
+
+    def create_event(self, message: AstrBotMessage) -> WeChatNativeEvent:
+        # Debounce and other plugins re-inject messages through this factory.
+        # The base Platform.create_event returns a generic event whose send()
+        # only records metrics, so replies to re-injected messages silently
+        # never reach WeChat.
+        return WeChatNativeEvent(message, self)
 
     def get_client(self):
         return self.client
