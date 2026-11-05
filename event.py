@@ -1,12 +1,13 @@
 """AstrBot message conversion and event lifecycle."""
 
 import asyncio
+import base64
 import re
 from datetime import UTC, datetime
 from urllib.parse import quote, unquote
 
 from astrbot.api.event import AstrMessageEvent, MessageChain
-from astrbot.api.message_components import At, AtAll, Image, Plain, Reply
+from astrbot.api.message_components import At, AtAll, Image, Plain, Record, Reply
 from astrbot.api.platform import AstrBotMessage, Group, MessageMember, MessageType
 
 from .config import DEFAULT_IMAGE_PROMPT, DEFAULT_PDF_PROMPT
@@ -69,6 +70,7 @@ def convert_message(
     *,
     image_bytes: bytes | None = None,
     pdf_name: str | None = None,
+    voice_bytes: bytes | None = None,
 ) -> AstrBotMessage:
     result = AstrBotMessage()
     thread, sender = raw["threadId"], raw["senderId"]
@@ -82,13 +84,16 @@ def convert_message(
     result.sender = MessageMember(user_id=sender, nickname=sender)
     result.group = Group(group_id=thread) if group else None
     text = raw["body"] if isinstance(raw.get("body"), str) else ""
+    if voice_bytes is not None and raw.get("type") == 34:
+        text = ""  # Native voice metadata is not the user's transcript; AstrBot ASR fills it.
     mentions = raw.get("mentions")
-    if (
+    mentioned = (
         group
         and isinstance(mentions, dict)
         and mentions.get("state") == "known"
         and mentions.get("self") is True
-    ):
+    )
+    if mentioned:
         # WeChat terminates visible mention labels with U+2005. Keep the raw
         # body intact, and never treat an ordinary typed @name as metadata.
         text = re.sub(r"^(?:@[^\u2005\r\n]+\u2005[ \t]*)+", "", text)
@@ -98,9 +103,11 @@ def convert_message(
         text = DEFAULT_PDF_PROMPT
     result.message_str = text
     result.message = []
-    # In all mode this is an explicit policy wake marker, not evidence of a real @.
-    # The unmodified Native mentions remain available in raw_message.
-    if group:
+    # "all" mode injects a policy wake marker for every group message. Other
+    # modes only inject it for real mentions, so non-@ messages reach AstrBot
+    # without is_at_or_wake_command and can go through its proactive reply
+    # probability instead of being treated as an explicit wake.
+    if group and (mentioned or getattr(config, "group_reply_mode", "mention") == "all"):
         result.message.append(At(qq=self_id))
     quote = raw.get("quote")
     if raw.get("type") == 49 and raw.get("appMessageType") == 57 and isinstance(quote, dict):
@@ -117,6 +124,8 @@ def convert_message(
                 quoted_text = "[图片]"
         elif pdf_name is not None and quote.get("type") == 49 and state != "recalled":
             quoted_text = f"[PDF 文件] {pdf_name}"
+        elif voice_bytes is not None and quote.get("type") == 34 and state != "recalled":
+            quoted_text = "[语音]"
         elif state == "recalled":
             quoted_text = "引用消息已撤回"
         elif state == "unsupported":
@@ -131,20 +140,36 @@ def convert_message(
                 chain=[Plain(quoted_text)],
             )
         )
-    result.message.append(Plain(text))
+    if text or (image_bytes is None and voice_bytes is None):
+        result.message.append(Plain(text))
     if image_bytes is not None:
         result.message.append(Image.fromBytes(image_bytes))
+    if voice_bytes is not None:
+        result.message.append(Record.fromBase64(base64.b64encode(voice_bytes).decode("ascii")))
     result.raw_message = raw
     result.timestamp = message_timestamp(raw) or int(datetime.now(UTC).timestamp())
     return result
 
 
-def serialize_text(chain: MessageChain, *, group: bool) -> tuple[str, dict | None, str | None]:
-    text, users, all_members = [], [], False
+def serialize_chain(
+    chain: MessageChain, *, group: bool
+) -> tuple[list[str | Image | Record], dict | None, str | None]:
+    """Keep media between contiguous text runs; metadata belongs to the first text run."""
+    parts, text, users, all_members = [], [], [], False
     reply_id = None
+
+    def flush_text():
+        value = "".join(text)
+        if value.strip():
+            parts.append(value)
+        text.clear()
+
     for component in chain.chain:
         if isinstance(component, Plain):
             text.append(component.text)
+        elif isinstance(component, (Image, Record)):
+            flush_text()
+            parts.append(component)
         elif isinstance(component, At):
             user = str(component.qq)
             if user == "all":
@@ -159,13 +184,23 @@ def serialize_text(chain: MessageChain, *, group: bool) -> tuple[str, dict | Non
                 raise ValueError("Native 引用回复需要且只能指定一条原消息")
             reply_id = target
         else:
-            raise ValueError("WeChat Native 首版仅支持文本和群 @，请关闭文本转图片")
+            raise ValueError("WeChat Native 仅支持发送文本、图片、语音、引用和群 @")
+    flush_text()
     if (users or all_members) and not group:
         users, all_members = [], False
     if users and all_members:
         raise ValueError("不能同时 @个人和 @全体")
     mentions = {"all": True} if all_members else {"userIds": users} if users else None
-    return "".join(text), mentions, reply_id
+    if parts and not any(isinstance(part, str) for part in parts) and (mentions or reply_id):
+        raise ValueError("Native 媒体接口不支持引用或 @，请在消息链中添加文本承载这些信息")
+    return parts, mentions, reply_id
+
+
+def serialize_text(chain: MessageChain, *, group: bool) -> tuple[str, dict | None, str | None]:
+    parts, mentions, reply_id = serialize_chain(chain, group=group)
+    if any(not isinstance(part, str) for part in parts):
+        raise ValueError("媒体消息需要通过 send_chain 发送")
+    return "".join(parts), mentions, reply_id
 
 
 class WeChatNativeEvent(AstrMessageEvent):
@@ -176,6 +211,11 @@ class WeChatNativeEvent(AstrMessageEvent):
     async def send(self, message: MessageChain) -> None:
         if self.adapter.stopped:
             raise RuntimeError("WeChat Native 已停止")
+        raw = (
+            self.message_obj.raw_message
+            if isinstance(self.message_obj.raw_message, dict)
+            else None
+        )
         status = self.adapter.state.message_status(self.message_obj.message_id)
         if status == "recalled":
             self.stop_event()
@@ -184,9 +224,14 @@ class WeChatNativeEvent(AstrMessageEvent):
             raise RuntimeError("此消息的回复需人工检查，禁止自动重发")
         try:
             sent = await self.adapter.send_chain(
-                self.message_obj.raw_message["threadId"],
+                raw["threadId"]
+                if raw
+                else session_target(
+                    self.message_obj.session_id,
+                    self.adapter.native_config.account_id,
+                ),
                 message,
-                source=self.message_obj.raw_message,
+                source=raw,
                 event=self,
             )
         except (Exception, asyncio.CancelledError) as error:
@@ -200,6 +245,8 @@ class WeChatNativeEvent(AstrMessageEvent):
                     )
             raise
         if sent:
+            if raw is None and status == "queued":
+                self.adapter.state.mark_message(self.message_obj.message_id, "replied")
             await super().send(message)
         elif self.adapter.state.message_status(self.message_obj.message_id) == "queued":
             self.adapter.state.mark_message(self.message_obj.message_id, "no_reply")

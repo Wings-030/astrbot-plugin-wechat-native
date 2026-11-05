@@ -44,8 +44,18 @@ class StateStore:
                 key TEXT PRIMARY KEY, message_id TEXT, thread TEXT NOT NULL,
                 state TEXT NOT NULL, send_id TEXT);
             CREATE INDEX IF NOT EXISTS sends_message_state ON sends(message_id, state);
+            CREATE TABLE IF NOT EXISTS send_chunks (
+                key TEXT NOT NULL, part INTEGER NOT NULL, state TEXT NOT NULL,
+                duration_ms INTEGER NOT NULL, server_id TEXT,
+                PRIMARY KEY(key, part));
         """)
         with self.db:
+            self.db.execute(
+                "UPDATE messages SET status='partial' WHERE status IN ('queued','needs_review') "
+                "AND EXISTS (SELECT 1 FROM sends JOIN send_chunks USING(key) "
+                "WHERE sends.message_id=messages.id AND sends.state!='accepted' "
+                "AND send_chunks.state='accepted')"
+            )
             self.db.execute("UPDATE messages SET status='needs_review' WHERE status='queued'")
             self.db.execute("UPDATE sends SET state='needs_review' WHERE state='submitting'")
             self.db.execute(
@@ -145,12 +155,64 @@ class StateStore:
     def finish_send(self, key: str, state: str, send_id: str | None):
         with self.db:
             self.db.execute(
-                "UPDATE sends SET state=?, send_id=? WHERE key=?", (state, send_id, key)
+                "UPDATE sends SET state=?, send_id=COALESCE(?, send_id) WHERE key=?",
+                (state, send_id, key),
             )
+
+    def record_send_id(self, key: str, send_id: str):
+        """Retain an asynchronous media job before polling or process shutdown."""
+        with self.db:
+            self.db.execute("UPDATE sends SET send_id=? WHERE key=?", (send_id, key))
 
     def send_record(self, key: str) -> dict | None:
         row = self.db.execute("SELECT * FROM sends WHERE key=?", (key,)).fetchone()
         return dict(row) if row else None
+
+    def record_voice_chunks(self, key: str, chunks: list):
+        """Journal Native's per-note receipts without retaining audio or transcripts."""
+        with self.db:
+            count = self.db.execute(
+                "SELECT COUNT(*) FROM send_chunks WHERE key=?", (key,)
+            ).fetchone()[0]
+            if count > len(chunks):
+                raise StateIdentityError(
+                    "Native voice receipts disappeared; inspect the retained job"
+                )
+            for chunk in chunks:
+                existing = self.db.execute(
+                    "SELECT * FROM send_chunks WHERE key=? AND part=?", (key, chunk["index"])
+                ).fetchone()
+                if existing and (
+                    existing["duration_ms"] != chunk["durationMs"]
+                    or (existing["state"] == "accepted" and chunk["state"] != "accepted")
+                    or (
+                        existing["server_id"] is not None
+                        and existing["server_id"] != chunk.get("serverMessageId")
+                    )
+                ):
+                    raise StateIdentityError(
+                        "Native voice receipt changed; inspect the retained job"
+                    )
+                self.db.execute(
+                    "INSERT INTO send_chunks VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(key, part) DO UPDATE SET state=excluded.state, "
+                    "server_id=COALESCE(excluded.server_id, send_chunks.server_id)",
+                    (
+                        key,
+                        chunk["index"],
+                        chunk["state"],
+                        chunk["durationMs"],
+                        chunk.get("serverMessageId"),
+                    ),
+                )
+
+    def voice_chunks(self, key: str) -> list[dict]:
+        return [
+            dict(row)
+            for row in self.db.execute(
+                "SELECT * FROM send_chunks WHERE key=? ORDER BY part", (key,)
+            )
+        ]
 
     def close(self):
         self.db.close()

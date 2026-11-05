@@ -403,8 +403,6 @@ def test_plugin_registers_config_in_real_astrbot():
 
 
 async def test_platform_icon_is_served_through_astrbot_file_api():
-    import xml.etree.ElementTree as ET
-
     import httpx
     from astrbot.core.platform.register import platform_registry
     from astrbot.dashboard.api.files import router
@@ -430,8 +428,8 @@ async def test_platform_icon_is_served_through_astrbot_file_api():
         for _ in range(2):  # The list and editor must both be able to fetch the icon.
             response = await client.get(f"/api/v1/files/tokens/{token}")
             assert response.status_code == 200
-            assert response.headers["content-type"].startswith("image/svg+xml")
-            assert ET.fromstring(response.content).tag == "{http://www.w3.org/2000/svg}svg"
+            assert response.headers["content-type"].startswith("image/png")
+            assert response.content.startswith(b"\x89PNG\r\n\x1a\n")
 
 
 async def test_startup_retries_and_preserves_framework_instance_identity(serve, tmp_path):
@@ -573,7 +571,7 @@ async def test_recall_arriving_during_source_read_blocks_submission(serve, tmp_p
         await adapter.terminate()
 
 
-async def test_unsupported_output_failure_is_retained_without_send(serve, tmp_path):
+async def test_invalid_image_output_failure_is_retained_without_send(serve, tmp_path):
     from astrbot.api.event import MessageChain
     from astrbot.api.message_components import Image
 
@@ -582,7 +580,7 @@ async def test_unsupported_output_failure_is_retained_without_send(serve, tmp_pa
         await adapter.process_native_event(native_event(msg))
         event = queue.get_nowait()
         with pytest.raises(ValueError):
-            await event.send(MessageChain([Image.fromURL("https://invalid.example/image.png")]))
+            await event.send(MessageChain([Image.fromBytes(b"invalid image")]))
         assert not sent
         assert adapter.state.message_status("m1") == "failed"
     finally:
@@ -825,7 +823,7 @@ async def test_later_validation_failure_keeps_partial_success_and_blocks_next_se
         event = queue.get_nowait()
         await event.send(MessageChain().message("first"))
         with pytest.raises(ValueError):
-            await event.send(MessageChain([Image.fromURL("https://invalid.example/image.png")]))
+            await event.send(MessageChain([Image.fromBytes(b"invalid image")]))
         assert adapter.state.message_status("m1") == "partial"
         assert adapter.state.send_record(sent[0][0])["state"] == "accepted"
         with pytest.raises(RuntimeError, match="人工检查"):

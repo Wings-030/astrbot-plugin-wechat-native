@@ -1,11 +1,19 @@
-"""agent-wechat-native v1.3.3 /v1 transport; no AstrBot OpenAPI dependency."""
+"""agent-wechat-native v1.4.0 /v1 transport; no AstrBot OpenAPI dependency."""
 
 import asyncio
+import base64
+import binascii
 import hashlib
 import io
+import ipaddress
 import json
-from collections.abc import AsyncIterator
-from urllib.parse import quote
+import re
+import socket
+import wave
+from collections.abc import AsyncIterator, Awaitable, Callable
+from pathlib import Path
+from urllib.parse import quote, urljoin, urlsplit
+from urllib.request import url2pathname
 from uuid import UUID
 
 import aiohttp
@@ -17,7 +25,10 @@ from .config import (
     MAX_PDF_BYTES,
     MAX_PDF_PAGES,
     MAX_PDF_TEXT_CHARS,
+    MAX_VOICE_BYTES,
+    MAX_VOICE_SECONDS,
     MEDIA_DOWNLOAD_TIMEOUT,
+    VOICE_SEND_TIMEOUT,
 )
 from .state import cursor_number
 
@@ -64,6 +75,9 @@ _SAFE_CODES = {
     "mention_group_membership_unavailable",
     "group_contact_unavailable",
     "group_state_incomplete",
+    "voice_duration_limit",
+    "media_audio_invalid",
+    "unsupported_voice_chunk",
 }
 
 MEDIA_ERROR_MESSAGES = {
@@ -89,6 +103,16 @@ PDF_ERROR_MESSAGES = {
     "not_pdf": "",
 }
 
+VOICE_ERROR_MESSAGES = {
+    "unavailable": "语音无法读取，请重新发送。",
+    "expired": "引用的语音已失效，请重新发送。",
+    "too_large": "语音太大或时长超限，暂时无法处理。",
+    "missing_scope": "语音读取功能未正确配置，请联系管理员。",
+    "unsupported_format": "暂不支持这种音频格式。",
+    "recalled": "",
+    "recent_unavailable": "未找到你在本群最近2分钟发送的语音，请重新发送或引用语音。",
+}
+
 _VARIANT_RANK = {"original": 0, "standard": 1, "thumbnail": 2}
 _NON_TRANSFERABLE_STATES = {
     "available",
@@ -109,8 +133,10 @@ class NativeAPIError(Exception):
 
 class MediaError(Exception):
     def __init__(self, reason: str = "unavailable", *, media_kind: str = "image"):
-        self.media_kind = "pdf" if media_kind == "pdf" else "image"
-        messages = PDF_ERROR_MESSAGES if self.media_kind == "pdf" else MEDIA_ERROR_MESSAGES
+        self.media_kind = media_kind if media_kind in {"pdf", "voice"} else "image"
+        messages = {"pdf": PDF_ERROR_MESSAGES, "voice": VOICE_ERROR_MESSAGES}.get(
+            self.media_kind, MEDIA_ERROR_MESSAGES
+        )
         self.reason = reason if reason in messages else "unavailable"
         self.user_message = messages[self.reason]
         super().__init__(f"Native media error: {self.reason}")
@@ -126,8 +152,9 @@ class QuotedMediaMetadataError(MediaError):
 class SendError(Exception):
     """A retained send requires inspection. Never automatically create a new key."""
 
-    def __init__(self, state: str, key: str, send_id: str | None = None):
+    def __init__(self, state: str, key: str, send_id: str | None = None, *, chunks=None):
         self.state, self.key, self.send_id = state, key, send_id
+        self.chunks = chunks
         super().__init__(f"Native send requires inspection: {state}")
 
 
@@ -191,7 +218,12 @@ def _map_media_code(
         return MediaError("missing_scope", media_kind=media_kind)
     if code == "message_recalled" or (status == 410 and code != "event_cursor_expired"):
         return MediaError("recalled", media_kind=media_kind)
-    if status == 413 or code in {"image_size_limit", "source_size_limit", "wxgf_preview_limit"}:
+    if status == 413 or code in {
+        "image_size_limit",
+        "source_size_limit",
+        "wxgf_preview_limit",
+        "voice_duration_limit",
+    }:
         return MediaError("too_large", media_kind=media_kind)
     if code == "media_expired" or (
         quoted
@@ -209,6 +241,8 @@ def _map_media_code(
         "wxgf_decode_failed",
         "wxgf_decoder_unavailable",
         "wxgf_decode_timeout",
+        "media_audio_invalid",
+        "unsupported_voice_chunk",
     }:
         return MediaError("unsupported_format", media_kind=media_kind)
     return MediaError("unavailable", media_kind=media_kind)
@@ -378,6 +412,257 @@ def validate_image_bytes(data: bytes, *, max_bytes: int = MAX_IMAGE_BYTES) -> st
     raise MediaError("unsupported_format")
 
 
+def _normalize_streaming_wav(data: bytes) -> bytes:
+    """Rewrite placeholder RIFF/data chunk sizes so the daemon can parse streaming WAV."""
+    if not (data.startswith(b"RIFF") and data[8:12] == b"WAVE"):
+        return data
+    total = len(data)
+    if int.from_bytes(data[4:8], "little") + 8 <= total:
+        return data
+    out = bytearray(data)
+    out[4:8] = (total - 8).to_bytes(4, "little")
+    index = 12
+    while index + 8 <= total:
+        chunk_id = bytes(out[index:index + 4])
+        chunk_size = int.from_bytes(out[index + 4:index + 8], "little")
+        available = total - index - 8
+        if chunk_id == b"data":
+            out[index + 4:index + 8] = available.to_bytes(4, "little")
+            break
+        if chunk_size > available:
+            break
+        index += 8 + chunk_size + (chunk_size & 1)
+    return bytes(out)
+
+
+def validate_voice_bytes(data: bytes, *, normal: bool = False) -> str:
+    """Check containers; Native owns decoding and duration checks for compressed audio."""
+    if not data:
+        raise MediaError("unavailable", media_kind="voice")
+    if len(data) > MAX_VOICE_BYTES:
+        raise MediaError("too_large", media_kind="voice")
+    if data.startswith(b"RIFF") and data[8:12] == b"WAVE":
+        if normal and int.from_bytes(data[4:8], "little") + 8 > len(data):
+            raise MediaError("unavailable", media_kind="voice")
+        try:
+            with wave.open(io.BytesIO(data)) as audio:
+                declared_frames, rate = audio.getnframes(), audio.getframerate()
+                channels, width = audio.getnchannels(), audio.getsampwidth()
+                if not rate or not channels or not width:
+                    raise MediaError("unavailable", media_kind="voice")
+                pcm = audio.readframes(len(data))
+                if normal and len(pcm) != declared_frames * channels * width:
+                    raise MediaError("unavailable", media_kind="voice")
+                frames = len(pcm) // (channels * width)
+                if not frames or len(pcm) % (channels * width):
+                    raise MediaError("unavailable", media_kind="voice")
+                if frames > rate * (60 if normal else MAX_VOICE_SECONDS):
+                    raise MediaError("too_large", media_kind="voice")
+                if normal and (channels, width, rate) != (1, 2, 16000):
+                    raise MediaError("unsupported_format", media_kind="voice")
+            return "audio/wav"
+        except wave.Error as error:
+            if not normal and str(error).startswith("unknown format:"):
+                # Float/compressed WAV from TTS is valid input to Native's FFmpeg
+                # path even when Python's PCM-only reader cannot open it.
+                return "audio/wav"
+            raise MediaError("unsupported_format", media_kind="voice") from None
+        except EOFError:
+            raise MediaError("unsupported_format", media_kind="voice") from None
+    if not normal:
+        if data.startswith((b"#!SILK_V3", b"\x02#!SILK_V3")):
+            return "audio/silk"
+        if data.startswith(b"fLaC"):
+            return "audio/flac"
+        if data.startswith(b"OggS"):
+            return "audio/ogg"
+        if len(data) > 2 and data[0] == 0xFF and data[1] & 0xF6 == 0xF0:
+            return "audio/aac"
+        if data.startswith(b"ID3") or (
+            len(data) > 2
+            and data[0] == 0xFF
+            and data[1] & 0xE0 == 0xE0
+            and data[1] & 6 != 0
+            and data[1] & 0x18 != 8
+        ):
+            return "audio/mpeg"
+        if data[4:8] == b"ftyp":
+            return "audio/mp4"
+        if data.startswith(b"\x1aE\xdf\xa3"):
+            return "audio/webm"
+    raise MediaError("unsupported_format", media_kind="voice")
+
+
+def _public_media_address(host: str) -> None:
+    address = ipaddress.ip_address(host)
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    if not address.is_global or address.is_multicast or address.is_unspecified:
+        raise ValueError("媒体 URL 只允许公网地址")
+
+
+class _PublicMediaResolver(aiohttp.abc.AbstractResolver):
+    """Validate the actual connector DNS answers, avoiding a second DNS lookup."""
+
+    def __init__(self):
+        self.resolver = aiohttp.resolver.DefaultResolver()
+
+    async def resolve(self, host, port=0, family=socket.AF_INET):
+        results = await self.resolver.resolve(host, port, family)
+        if not results:
+            raise ValueError("媒体 URL 无可用公网地址")
+        for result in results:
+            _public_media_address(result["host"])
+        return results
+
+    async def close(self):
+        await self.resolver.close()
+
+
+async def load_outgoing_image(image) -> tuple[bytes, str]:
+    return await _load_outgoing_media(image.url or image.file or image.path, kind="image")
+
+
+async def load_outgoing_voice(record) -> tuple[bytes, str]:
+    # Match Record's file -> url -> path fallback without using its URL downloader
+    # or converting TTS output locally. Native owns decoding, duration and SILK.
+    source = None
+    for candidate in (record.file, record.url, record.path):
+        if not isinstance(candidate, str) or not candidate:
+            continue
+        if candidate.startswith(("file:", "http:", "https:", "base64://", "data:")):
+            source = candidate
+            break
+        try:
+            if len(candidate) < 4096 and await asyncio.to_thread(Path(candidate).is_file):
+                source = candidate
+                break
+        except OSError:
+            pass
+    return await _load_outgoing_media(
+        source or record.file or record.url or record.path, kind="voice"
+    )
+
+
+async def _load_outgoing_media(source, *, kind: str) -> tuple[bytes, str]:
+    """Resolve standard media references with bounded local and public URL reads."""
+    max_bytes = MAX_VOICE_BYTES if kind == "voice" else MAX_IMAGE_BYTES
+    label = "语音" if kind == "voice" else "图片"
+    if not isinstance(source, str) or not source:
+        raise ValueError(f"{label}来源为空")
+    try:
+        if source.lower().startswith(("http:", "https:")):
+            data = await _download_public_media(source, max_bytes=max_bytes)
+        elif source.startswith(("base64://", "data:")):
+            if source.startswith("data:"):
+                header, separator, encoded = source.partition(",")
+                if (
+                    not separator
+                    or not header.lower().startswith(
+                        "data:audio/" if kind == "voice" else "data:image/"
+                    )
+                    or not header.lower().endswith(";base64")
+                ):
+                    raise ValueError("媒体 data URI 必须使用匹配的 MIME 和 base64")
+            else:
+                encoded = source[len("base64://") :]
+            data = _decode_media_base64(encoded, max_bytes=max_bytes)
+        else:
+            if source.lower().startswith("file:"):
+                uri = urlsplit(source)
+                if uri.netloc or uri.query or uri.fragment:
+                    raise ValueError("不支持网络媒体路径")
+                source = url2pathname(uri.path)
+            elif "://" in source:
+                raise ValueError("媒体 URL 只支持 HTTP(S)")
+            if source.startswith(("\\\\", "//")):
+                raise ValueError("不支持网络媒体路径")
+            path = Path(source)
+            # AstrBot also accepts legacy bare base64; prefer an existing local path.
+            try:
+                local_file = len(source) < 4096 and await asyncio.to_thread(path.is_file)
+            except OSError:
+                local_file = False  # Long bare base64 can exceed an OS filename limit.
+            if local_file:
+                data = await asyncio.to_thread(_read_media_file, path, max_bytes)
+            else:
+                data = _decode_media_base64(source, max_bytes=max_bytes)
+        content_type = validate_voice_bytes(data) if kind == "voice" else validate_image_bytes(data)
+        return bytes(data), content_type
+    except MediaError as error:
+        raise ValueError(f"发送{label}校验失败：{error.reason}") from None
+    except (OSError, aiohttp.ClientError, TimeoutError, binascii.Error):
+        raise ValueError(f"发送{label}读取失败或超时，未提交发送") from None
+
+
+def _decode_media_base64(encoded: str, *, max_bytes: int) -> bytes:
+    if len(encoded) > ((max_bytes + 2) // 3) * 4 + 1024:
+        raise ValueError(f"发送媒体超过大小限制 ({max_bytes} bytes)")
+    compact = "".join(encoded.split())
+    return base64.b64decode(compact + "=" * (-len(compact) % 4), validate=True)
+
+
+def _read_media_file(path: Path, max_bytes: int) -> bytes:
+    if path.stat().st_size > max_bytes:
+        raise ValueError(f"发送媒体超过大小限制 ({max_bytes} bytes)")
+    with path.open("rb") as stream:
+        return stream.read(max_bytes + 1)
+
+
+async def _download_public_media(url: str, *, max_bytes: int) -> bytes:
+    resolver = _PublicMediaResolver()
+    try:
+        async with (
+            aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(resolver=resolver, use_dns_cache=False),
+                timeout=aiohttp.ClientTimeout(total=15, connect=5, sock_read=5),
+                trust_env=False,
+                cookie_jar=aiohttp.DummyCookieJar(),
+                auto_decompress=False,
+            ) as session,
+            asyncio.timeout(15),
+        ):
+            for redirects in range(4):
+                parsed = urlsplit(url)
+                if (
+                    parsed.scheme not in {"http", "https"}
+                    or not parsed.hostname
+                    or parsed.username is not None
+                    or parsed.password is not None
+                    or parsed.port not in {None, 80, 443}
+                    or "\\" in url
+                    or any(ord(char) < 33 or ord(char) == 127 for char in url)
+                ):
+                    raise ValueError("媒体 URL 协议、端口或格式不允许")
+                try:
+                    ipaddress.ip_address(parsed.hostname)
+                except ValueError:
+                    pass  # Hostnames are checked by the connector's resolver.
+                else:
+                    _public_media_address(parsed.hostname)
+                async with session.get(url, allow_redirects=False) as response:
+                    if response.status in {301, 302, 303, 307, 308}:
+                        location = response.headers.get("Location")
+                        if redirects == 3 or not location:
+                            raise ValueError("媒体 URL 重定向过多或无效")
+                        url = urljoin(url, location)
+                        continue
+                    if response.status != 200:
+                        raise ValueError("媒体 URL 下载失败")
+                    if response.headers.get("Content-Encoding", "identity").lower() != "identity":
+                        raise ValueError("媒体 URL 不支持压缩传输")
+                    if response.content_length is not None and response.content_length > max_bytes:
+                        raise ValueError(f"发送媒体超过大小限制 ({max_bytes} bytes)")
+                    data = bytearray()
+                    async for chunk in response.content.iter_chunked(65536):
+                        if len(data) + len(chunk) > max_bytes:
+                            raise ValueError(f"发送媒体超过大小限制 ({max_bytes} bytes)")
+                        data.extend(chunk)
+                    return bytes(data)
+    finally:
+        await resolver.close()
+
+
 class NativeClient:
     def __init__(
         self,
@@ -390,6 +675,7 @@ class NativeClient:
         media_timeout: float = MEDIA_DOWNLOAD_TIMEOUT,
         poll_interval: float = 0.25,
         idle_timeout: float = 45,
+        voice_send_timeout: float = VOICE_SEND_TIMEOUT,
     ):
         self.api_url = api_url
         self.account_id = account_id
@@ -398,6 +684,7 @@ class NativeClient:
         self.request_timeout = request_timeout
         self.send_timeout, self.poll_interval = send_timeout, poll_interval
         self.media_timeout = media_timeout
+        self.voice_send_timeout = voice_send_timeout
         self.idle_timeout = idle_timeout
         self._session: aiohttp.ClientSession | None = None
 
@@ -567,27 +854,36 @@ class NativeClient:
         self, message_id: str, kind: str, *, quoted: bool, guard=None
     ) -> list[dict]:
         _check_guard(guard)
-        logger.debug("WeChat Native 查询图片资产：message=%s quoted=%s", message_id, quoted)
+        media_label = {"file": "PDF", "voice": "语音", "image": "图片"}.get(kind, "媒体")
+        media_kind = "pdf" if kind == "file" else kind if kind in {"voice", "image"} else "image"
+        logger.debug(
+            "WeChat Native 查询%s资产：message=%s quoted=%s", media_label, message_id, quoted
+        )
         try:
             body = await self.media_assets(message_id)
         except NativeAPIError as error:
             if quoted and error.status == 409 and error.code == "media_metadata_invalid":
                 raise QuotedMediaMetadataError() from None
             logger.warning(
-                "WeChat Native 图片资产查询失败：message=%s http_status=%s code=%s",
+                "WeChat Native %s资产查询失败：message=%s http_status=%s code=%s",
+                media_label,
                 message_id,
                 error.status,
                 error.code,
             )
-            raise _map_media_code(error.code, quoted=quoted, status=error.status) from None
+            raise _map_media_code(
+                error.code, quoted=quoted, status=error.status, media_kind=media_kind
+            ) from None
         _check_guard(guard)
         items = body.get("items")
         if not isinstance(items, list):
-            logger.warning("WeChat Native 图片资产响应格式无效：message=%s", message_id)
-            raise MediaError("unavailable")
-        logger.debug("WeChat Native 图片资产查询完成：message=%s count=%s", message_id, len(items))
+            logger.warning("WeChat Native %s资产响应格式无效：message=%s", media_label, message_id)
+            raise MediaError("unavailable", media_kind=media_kind)
+        logger.debug(
+            "WeChat Native %s资产查询完成：message=%s count=%s", media_label, message_id, len(items)
+        )
         allowed_sources = {None, "quote"} if quoted else {None, "message"}
-        images = []
+        matched = []
         for item in items:
             if (
                 not isinstance(item, dict)
@@ -596,14 +892,17 @@ class NativeClient:
                 or not isinstance(item.get("id"), str)
                 or not item["id"]
             ):
-                logger.warning("WeChat Native 图片资产身份不匹配：message=%s", message_id)
-                raise MediaError("unavailable")
+                logger.warning(
+                    "WeChat Native %s资产身份不匹配：message=%s", media_label, message_id
+                )
+                raise MediaError("unavailable", media_kind=media_kind)
             if item.get("kind") != kind or item.get("source") not in allowed_sources:
                 continue
             reason = item.get("reason")
             logger.debug(
-                "WeChat Native 图片资产：message=%s asset=%s variant=%s actual_variant=%s "
+                "WeChat Native %s资产：message=%s asset=%s variant=%s actual_variant=%s "
                 "state=%s content_type=%s bytes=%s code=%s",
+                media_label,
                 message_id,
                 item["id"],
                 item.get("variant"),
@@ -614,14 +913,17 @@ class NativeClient:
                 reason if isinstance(reason, str) and reason in _SAFE_CODES else None,
             )
             if item.get("state") == "recalled" or item.get("reason") == "message_recalled":
-                raise MediaError("recalled")
-            images.append(item)
-        if not images:
+                raise MediaError("recalled", media_kind=media_kind)
+            matched.append(item)
+        if not matched:
             logger.warning(
-                "WeChat Native 未找到匹配的图片资产：message=%s quoted=%s", message_id, quoted
+                "WeChat Native 未找到匹配的%s资产：message=%s quoted=%s",
+                media_label,
+                message_id,
+                quoted,
             )
-            raise MediaError("expired" if quoted else "unavailable")
-        return images
+            raise MediaError("expired" if quoted else "unavailable", media_kind=media_kind)
+        return matched
 
     async def _poll_media_job(
         self,
@@ -1119,6 +1421,86 @@ class NativeClient:
         logger.debug("WeChat Native PDF 下载完成：asset=%s bytes=%s", asset["id"], len(data))
         return data, asset["filename"].strip()
 
+    async def fetch_voice(self, message_id: str, *, guard=None) -> bytes:
+        """Request Native's decoded normal WAV; never pass raw SILK to AstrBot ASR."""
+        try:
+            async with asyncio.timeout(self.media_timeout):
+                assets = await self._load_assets(message_id, "voice", quoted=False, guard=guard)
+                normal = [a for a in assets if _effective_variant(a) == "normal"]
+                if not normal:
+                    raise MediaError("unsupported_format", media_kind="voice")
+                asset = next((a for a in normal if a.get("state") == "available"), normal[0])
+                if asset.get("state") != "available":
+                    state = asset.get("state")
+                    if state in {"expired", "recalled", "unsupported", "unavailable", "failed"}:
+                        reason = {
+                            "expired": "expired",
+                            "recalled": "recalled",
+                            "unsupported": "unsupported_format",
+                        }.get(state, "unavailable")
+                        raise MediaError(reason, media_kind="voice")
+                    if state not in {"pending", "queued", "running", "advertised"}:
+                        raise MediaError("unavailable", media_kind="voice")
+                    initial = None
+                    job_id = asset.get("jobId")
+                    if not isinstance(job_id, str) or not job_id:
+                        _check_guard(guard)
+                        initial = await self.transfer_media(
+                            message_id, "normal", asset_id=asset["id"]
+                        )
+                        job_id = initial.get("id")
+                    await self._poll_media_job(
+                        job_id,
+                        message_id=message_id,
+                        initial=initial,
+                        asset_id=asset["id"],
+                        guard=guard,
+                    )
+                    refreshed = await self._load_assets(
+                        message_id, "voice", quoted=False, guard=guard
+                    )
+                    current = next(
+                        (
+                            a
+                            for a in refreshed
+                            if a["id"] == asset["id"]
+                            and _effective_variant(a) == "normal"
+                            and a.get("state") == "available"
+                        ),
+                        None,
+                    )
+                    if current is None:
+                        raise MediaError("unavailable", media_kind="voice")
+                    asset = current
+                size = asset.get("byteLength")
+                sha = asset.get("sha256")
+                if (
+                    type(size) is not int
+                    or size <= 0
+                    or not isinstance(sha, str)
+                    or not re.fullmatch(r"[a-fA-F0-9]{64}", sha)
+                ):
+                    raise MediaError("unavailable", media_kind="voice")
+                if size > MAX_VOICE_BYTES:
+                    raise MediaError("too_large", media_kind="voice")
+                _check_guard(guard)
+                data, content_type = await self.media_content(
+                    asset["id"], max_bytes=MAX_VOICE_BYTES
+                )
+                _check_guard(guard)
+                if len(data) != size or hashlib.sha256(data).hexdigest().lower() != sha.lower():
+                    raise MediaError("unavailable", media_kind="voice")
+                if content_type not in {"audio/wav", "audio/x-wav", "application/octet-stream"}:
+                    raise MediaError("unsupported_format", media_kind="voice")
+                validate_voice_bytes(data, normal=True)
+                return data
+        except NativeAPIError as error:
+            raise _map_media_code(error.code, status=error.status, media_kind="voice") from None
+        except MediaError as error:
+            raise MediaError(error.reason, media_kind="voice") from None
+        except TimeoutError:
+            raise MediaError("unavailable", media_kind="voice") from None
+
     async def send(self, send_id: str):
         return await self._request("GET", self.prefix + "/sends/" + quote(send_id, safe=""))
 
@@ -1126,6 +1508,220 @@ class NativeClient:
         return await self._request(
             "GET", self.prefix + "/sends/by-idempotency-key", params={"key": key}
         )
+
+    async def _submit_send(self, payload: dict, key: str) -> dict:
+        try:
+            return await self._request(
+                "POST", self.prefix + "/sends", json=payload, headers={"Idempotency-Key": key}
+            )
+        except NativeAPIError as error:
+            if 400 <= error.status < 500 and error.status not in {408, 429}:
+                raise
+            try:
+                return await self.send_by_key(key)
+            except NativeAPIError:
+                raise SendError("submission_unknown", key) from None
+
+    async def send_image(
+        self,
+        thread: str,
+        data: bytes,
+        content_type: str,
+        key: str,
+        *,
+        record_job: Callable[[str], None],
+        before_send: Callable[[], Awaitable[None]],
+    ) -> dict:
+        """Stage bytes, submit one image job, then read that job without resubmitting."""
+        suffix = {"image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp"}
+        if validate_image_bytes(data) != content_type:
+            raise ValueError("发送图片 MIME 与内容不匹配")
+        return await self._send_media(
+            thread,
+            data,
+            content_type,
+            key,
+            kind="image",
+            filename="image." + suffix[content_type],
+            record_job=record_job,
+            before_send=before_send,
+        )
+
+    async def send_voice(
+        self,
+        thread: str,
+        data: bytes,
+        content_type: str,
+        key: str,
+        *,
+        record_job: Callable[[str], None],
+        before_send: Callable[[], Awaitable[None]],
+        record_chunks: Callable[[list], None],
+    ) -> dict:
+        if validate_voice_bytes(data) != content_type:
+            raise ValueError("发送语音 MIME 与内容不匹配")
+        if content_type == "audio/wav":
+            data = _normalize_streaming_wav(data)
+        suffix = {
+            "audio/wav": "wav",
+            "audio/mpeg": "mp3",
+            "audio/flac": "flac",
+            "audio/ogg": "ogg",
+            "audio/aac": "aac",
+            "audio/mp4": "m4a",
+            "audio/webm": "webm",
+            "audio/silk": "silk",
+        }
+        return await self._send_media(
+            thread,
+            data,
+            content_type,
+            key,
+            kind="voice",
+            filename="voice." + suffix[content_type],
+            record_job=record_job,
+            before_send=before_send,
+            record_chunks=record_chunks,
+        )
+
+    async def _send_media(
+        self,
+        thread: str,
+        data: bytes,
+        content_type: str,
+        key: str,
+        *,
+        kind: str,
+        filename: str,
+        record_job: Callable[[str], None],
+        before_send: Callable[[], Awaitable[None]],
+        record_chunks=None,
+    ) -> dict:
+        """Share upload, idempotent submission and job polling for images and voice."""
+        form = aiohttp.FormData()
+        form.add_field("file", data, filename=filename, content_type=content_type)
+        source = await self._request("POST", self.prefix + "/uploads", data=form)
+        if (
+            not isinstance(source.get("id"), str)
+            or not source["id"]
+            or source.get("byteLength") != len(data)
+            or source.get("sha256") != hashlib.sha256(data).hexdigest()
+        ):
+            raise SendError("upload_identity_mismatch", key)
+        await before_send()
+        value = await self._submit_send(
+            {"threadId": thread, "kind": kind, "sourceId": source["id"]}, key
+        )
+        deadline = asyncio.get_running_loop().time() + (
+            self.voice_send_timeout if kind == "voice" else self.send_timeout
+        )
+        job_id = None
+        server_id = None
+        voice_chunks = []
+
+        def inspection(state):
+            return SendError(state, key, job_id, chunks=voice_chunks)
+
+        while True:
+            if (
+                not isinstance(value.get("id"), str)
+                or not value["id"]
+                or (job_id is not None and value["id"] != job_id)
+                or value.get("accountId") != self.account_id
+                or value.get("threadId") != thread
+                or value.get("kind") != "send"
+                or value.get("sourceId") != source["id"]
+                or (
+                    kind != "voice"
+                    and server_id is not None
+                    and value.get("serverMessageId") != server_id
+                )
+            ):
+                raise inspection("receipt_identity_mismatch")
+            if job_id is None:
+                job_id = value["id"]
+                record_job(job_id)
+            if value.get("serverMessageId") is not None:
+                server_id = value["serverMessageId"]
+            result = value.get("result")
+            if kind == "voice" and isinstance(result, dict) and "chunks" in result:
+                chunks = result["chunks"]
+                if not isinstance(chunks, list) or len(chunks) > 256:
+                    raise inspection("unknown")
+                for index, chunk in enumerate(chunks):
+                    if (
+                        not isinstance(chunk, dict)
+                        or chunk.get("index") != index
+                        or chunk.get("state")
+                        not in {"prepared", "submitting", "accepted", "rejected", "needs_review"}
+                        or type(chunk.get("durationMs")) is not int
+                        or not 0 < chunk["durationMs"] <= 60000
+                        or (
+                            chunk.get("serverMessageId") is not None
+                            and (
+                                not isinstance(chunk["serverMessageId"], str)
+                                or not chunk["serverMessageId"]
+                            )
+                        )
+                        or (chunk["state"] == "accepted" and not chunk.get("serverMessageId"))
+                    ):
+                        raise inspection("unknown")
+                record_chunks(chunks)
+                voice_chunks = chunks
+            state = value.get("state")
+            if state in {"failed", "cancelled", "partial", "needs_review"}:
+                if state in {"failed", "cancelled"} and any(
+                    c["state"] == "accepted" for c in voice_chunks
+                ):
+                    state = "partial"
+                raise inspection(state)
+            if state in {"accepted", "completed", "succeeded"}:
+                result = value.get("result")
+                if isinstance(result, dict):
+                    if result.get("profileProjection") in {"unknown", "not_applicable"}:
+                        raise inspection("needs_review")
+                    if kind == "voice" and any(
+                        c["state"] in {"rejected", "needs_review"} for c in voice_chunks
+                    ):
+                        raise inspection("needs_review")
+                    ids = result.get("messageIds")
+                    complete_voice = (
+                        kind == "voice"
+                        and bool(voice_chunks)
+                        and isinstance(ids, list)
+                        and len(ids) == len(voice_chunks)
+                        and all(isinstance(item, str) and item for item in ids)
+                        and len(set(ids)) == len(ids)
+                        and all(chunk["state"] == "accepted" for chunk in voice_chunks)
+                        and value.get("serverMessageId") == voice_chunks[-1]["serverMessageId"]
+                    )
+                    if complete_voice:
+                        return value
+                    if (
+                        kind == "image"
+                        and isinstance(value.get("serverMessageId"), str)
+                        and value["serverMessageId"]
+                        and isinstance(ids, list)
+                        and len(ids) == 1
+                        and isinstance(ids[0], str)
+                        and ids[0]
+                    ):
+                        return value
+            elif state not in {"queued", "running", "submitting"}:
+                raise inspection("unknown")
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise inspection("status_unavailable")
+            try:
+                async with asyncio.timeout(remaining):
+                    await asyncio.sleep(min(self.poll_interval, remaining))
+                    value = await self.job(job_id)
+            except NativeAPIError as error:
+                if error.status in {0, 408, 429} or 500 <= error.status < 600:
+                    continue  # Retry reads only; the POST and upload are never repeated.
+                raise inspection("status_unavailable") from None
+            except TimeoutError:
+                raise inspection("status_unavailable") from None
 
     async def _group_members_present(self, thread: str, user_ids: list[str]) -> bool:
         for username in user_ids:
@@ -1227,17 +1823,7 @@ class NativeClient:
             payload["mentions"] = mentions
         if quote is not None:
             payload["quote"] = quote
-        try:
-            value = await self._request(
-                "POST", self.prefix + "/sends", json=payload, headers={"Idempotency-Key": key}
-            )
-        except NativeAPIError as error:
-            if 400 <= error.status < 500 and error.status not in {408, 429}:
-                raise
-            try:
-                value = await self.send_by_key(key)
-            except NativeAPIError:
-                raise SendError("submission_unknown", key) from None
+        value = await self._submit_send(payload, key)
         deadline = asyncio.get_running_loop().time() + self.send_timeout
         send_id = None
         poll_failed = False

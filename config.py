@@ -8,6 +8,9 @@ PLUGIN_ID = "astrbot_plugin_wechat_native"
 ADAPTER_ID = "wechat_native"
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_VOICE_BYTES = 25 * 1024 * 1024 - 17
+MAX_VOICE_SECONDS = 300
+VOICE_SEND_TIMEOUT = 25 * 60
 MAX_PDF_BYTES = 20 * 1024 * 1024
 MAX_PDF_PAGES = 50
 MAX_PDF_TEXT_CHARS = 32000
@@ -19,6 +22,8 @@ RECENT_GROUP_IMAGE_SECONDS = 120
 MAX_RECENT_GROUP_IMAGES = 256
 RECENT_GROUP_PDF_SECONDS = 120
 MAX_RECENT_GROUP_PDFS = 256
+RECENT_GROUP_VOICE_SECONDS = 120
+MAX_RECENT_GROUP_VOICES = 256
 
 DEFAULT_CONFIG = {
     "id": "wechat_native",
@@ -32,6 +37,7 @@ DEFAULT_CONFIG = {
     "enable_media": True,
     "allowed_users": [],
     "group_reply_mode": "mention",
+    "group_reply_style": "mention",
     "allowed_groups": [],
     "unique_session": True,
     "enable_group_summary": False,
@@ -65,10 +71,10 @@ CONFIG_METADATA = {
     "enable_private_reply": {"type": "bool", "description": "启用私聊回复"},
     "enable_media": {
         "type": "bool",
-        "description": "启用图片与 PDF 识别",
+        "description": "启用图片、PDF 与语音识别",
         "hint": (
-            "支持私聊图片识别与 PDF 解析；"
-            "群聊可引用图片或 PDF 并 @机器人，或发送后在2分钟内 @机器人解析。"
+            "支持私聊图片、PDF 与语音，语音使用 AstrBot 配置的 ASR；"
+            "群聊可引用媒体并 @机器人，或发送后在2分钟内 @机器人解析。"
         ),
     },
     "allowed_users": {
@@ -79,8 +85,20 @@ CONFIG_METADATA = {
     "group_reply_mode": {
         "type": "string",
         "description": "群聊触发模式",
-        "options": ["mention", "all", "disabled"],
-        "hint": "mention：明确 @自己；all：所有文本；disabled：关闭",
+        "options": ["mention", "all", "probability", "disabled"],
+        "labels": ["仅 @", "全部回复", "概率回复", "关闭"],
+        "hint": (
+            "mention：明确 @自己；all：所有文本与直接语音都直接唤醒；"
+            "probability：所有文本与直接语音都进入 AstrBot，但只有 @ 才唤醒，"
+            "其余交给 AstrBot 的主动回复概率；disabled：关闭"
+        ),
+    },
+    "group_reply_style": {
+        "type": "string",
+        "description": "群聊回复方式",
+        "options": ["mention", "quote", "plain"],
+        "labels": ["@触发者", "引用触发消息", "直接发送"],
+        "hint": "首段回复自动 @或引用，也可直接发送；纯图片/语音直接发送。插件显式添加的 @和引用仍保留。",
     },
     "allowed_groups": {
         "type": "list",
@@ -120,6 +138,7 @@ class NativeConfig:
     enable_media: bool = True
     allowed_users: frozenset[str] = frozenset()
     group_reply_mode: str = "mention"
+    group_reply_style: str = "mention"
     allowed_groups: frozenset[str] = frozenset()
     unique_session: bool = True
     enable_group_summary: bool = False
@@ -147,8 +166,11 @@ class NativeConfig:
         if not isinstance(account, str) or not account.strip():
             raise ValueError("account_id 必填")
         mode = data.get("group_reply_mode", "mention")
-        if mode not in {"mention", "all", "disabled"}:
-            raise ValueError("group_reply_mode 必须为 mention/all/disabled")
+        if mode not in {"mention", "all", "probability", "disabled"}:
+            raise ValueError("group_reply_mode 必须为 mention/all/probability/disabled")
+        style = data.get("group_reply_style", "mention")
+        if not isinstance(style, str) or style not in {"mention", "quote", "plain"}:
+            raise ValueError("group_reply_style 必须为 mention/quote/plain")
         for key in (
             "enable_private_reply",
             "enable_media",
@@ -178,6 +200,7 @@ class NativeConfig:
             enable_private_reply=data.get("enable_private_reply", True),
             enable_media=data.get("enable_media", True),
             group_reply_mode=mode,
+            group_reply_style=style,
             unique_session=data.get("unique_session", True),
             enable_group_summary=data.get("enable_group_summary", False),
             summary_max_messages=data.get("summary_max_messages", 200),

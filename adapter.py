@@ -12,8 +12,13 @@ from pathlib import Path
 
 from astrbot.api import logger
 from astrbot.api.event import MessageChain
-from astrbot.api.message_components import Plain
-from astrbot.api.platform import Platform, PlatformMetadata, register_platform_adapter
+from astrbot.api.message_components import Plain, Record
+from astrbot.api.platform import (
+    AstrBotMessage,
+    Platform,
+    PlatformMetadata,
+    register_platform_adapter,
+)
 from astrbot.api.star import StarTools
 
 from .config import (
@@ -23,16 +28,18 @@ from .config import (
     MAX_CONCURRENT_MEDIA_TASKS,
     MAX_RECENT_GROUP_IMAGES,
     MAX_RECENT_GROUP_PDFS,
+    MAX_RECENT_GROUP_VOICES,
     PLUGIN_ID,
     RECENT_GROUP_IMAGE_SECONDS,
     RECENT_GROUP_PDF_SECONDS,
+    RECENT_GROUP_VOICE_SECONDS,
     NativeConfig,
 )
 from .event import (
     WeChatNativeEvent,
     convert_message,
     message_timestamp,
-    serialize_text,
+    serialize_chain,
     session_target,
 )
 from .native_client import (
@@ -44,6 +51,8 @@ from .native_client import (
     SendError,
     extract_pdf_text,
     is_pdf_filename,
+    load_outgoing_image,
+    load_outgoing_voice,
 )
 from .state import StateStore, cursor_number
 from .summary import GroupSummaryCache, is_summary_command
@@ -54,7 +63,7 @@ from .summary import GroupSummaryCache, is_summary_command
     "直接连接 agent-wechat-native 的个人微信平台适配器",
     default_config_tmpl=DEFAULT_CONFIG.copy(),
     adapter_display_name="WeChat Native",
-    logo_path="logo.svg",
+    logo_path="logo.png",
     support_streaming_message=False,
     config_metadata=CONFIG_METADATA,
 )
@@ -89,6 +98,7 @@ class WeChatNativeAdapter(Platform):
         self._media_semaphore = asyncio.Semaphore(MAX_CONCURRENT_MEDIA_TASKS)
         self._recent_group_images = OrderedDict()
         self._recent_group_pdfs = OrderedDict()
+        self._recent_group_voices = OrderedDict()
         self._events = weakref.WeakValueDictionary()
         self._send_lock = asyncio.Lock()
         self._terminate_lock = asyncio.Lock()
@@ -103,6 +113,13 @@ class WeChatNativeAdapter(Platform):
             adapter_display_name="WeChat Native",
             support_streaming_message=False,
         )
+
+    def create_event(self, message: AstrBotMessage) -> WeChatNativeEvent:
+        # Debounce and other plugins re-inject messages through this factory.
+        # The base Platform.create_event returns a generic event whose send()
+        # only records metrics, so replies to re-injected messages silently
+        # never reach WeChat.
+        return WeChatNativeEvent(message, self)
 
     def get_client(self):
         return self.client
@@ -141,12 +158,14 @@ class WeChatNativeAdapter(Platform):
         cfg = self.native_config
         msg_type = raw.get("type")
         is_direct_image = msg_type == 3
+        is_direct_voice = msg_type == 34
         # Native exposes a file's name only through its media asset, so a direct
         # file is only a candidate here; non-PDF files are dropped after that lookup.
         is_direct_file = msg_type == 49 and raw.get("appMessageType") == 6
         is_quote = msg_type == 49 and raw.get("appMessageType") == 57
         quote = raw.get("quote")
         is_quoted_image = is_quote and isinstance(quote, dict) and quote.get("type") == 3
+        is_quoted_voice = is_quote and isinstance(quote, dict) and quote.get("type") == 34
         # Native reports the quoted file's title as embeddedText (state is "unsupported").
         is_quoted_pdf = (
             is_quote
@@ -157,7 +176,7 @@ class WeChatNativeAdapter(Platform):
         )
         body = raw.get("body")
         has_text_body = isinstance(body, str) and bool(body.strip())
-        if is_direct_image:
+        if is_direct_image or is_direct_voice:
             if not cfg.enable_media:
                 return ignored("media_disabled")
             if body is not None and not isinstance(body, str):
@@ -179,7 +198,12 @@ class WeChatNativeAdapter(Platform):
             if cfg.allowed_users and raw["senderId"] not in cfg.allowed_users:
                 return ignored("user_not_allowed")
             if cfg.enable_media and (
-                is_direct_image or is_quoted_image or is_direct_file or is_quoted_pdf
+                is_direct_image
+                or is_quoted_image
+                or is_direct_file
+                or is_quoted_pdf
+                or is_direct_voice
+                or is_quoted_voice
             ):
                 return "media"
             return "text" if has_text_body else ignored("empty_text_body")
@@ -201,9 +225,15 @@ class WeChatNativeAdapter(Platform):
             stripped = re.sub(r"^(?:@[^\u2005\r\n]+\u2005[ \t]*)+", "", body)
             if is_summary_command(stripped):
                 return "text"
-        if cfg.enable_media and (is_quoted_image or is_quoted_pdf):
+        if is_direct_voice:
+            return (
+                "media"
+                if cfg.group_reply_mode in {"all", "probability"} or mentioned
+                else ignored("voice_without_mention")
+            )
+        if cfg.enable_media and (is_quoted_image or is_quoted_pdf or is_quoted_voice):
             return "media" if mentioned else ignored("quoted_media_without_mention")
-        if cfg.group_reply_mode == "all" or mentioned:
+        if cfg.group_reply_mode in {"all", "probability"} or mentioned:
             return "text"
         return ignored("group_without_mention")
 
@@ -237,12 +267,15 @@ class WeChatNativeAdapter(Platform):
         return cfg.enable_group_summary
 
     def _remember_group_image(self, raw: dict, origin: str) -> None:
-        """Remember a group member's latest image or file for a following @ request."""
+        """Remember a group member's latest media ID for a following @ request."""
         cfg = self.native_config
         thread, sender = raw["threadId"], raw.get("senderId")
         if raw.get("type") == 3:
             store, maximum = self._recent_group_images, MAX_RECENT_GROUP_IMAGES
             seconds = RECENT_GROUP_IMAGE_SECONDS
+        elif raw.get("type") == 34:
+            store, maximum = self._recent_group_voices, MAX_RECENT_GROUP_VOICES
+            seconds = RECENT_GROUP_VOICE_SECONDS
         elif raw.get("type") == 49 and raw.get("appMessageType") == 6:
             store, maximum = self._recent_group_pdfs, MAX_RECENT_GROUP_PDFS
             seconds = RECENT_GROUP_PDF_SECONDS
@@ -281,7 +314,7 @@ class WeChatNativeAdapter(Platform):
             store.popitem(last=False)
 
     def _recent_media_request(self, raw: dict, prompt: str) -> tuple[str | None, dict | None]:
-        """Return ("image" | "pdf", source) when an @ text asks about a recent attachment."""
+        """Return the requested media kind and same-sender recent source for an @ text."""
         mentions = raw.get("mentions")
         if (
             not self.native_config.enable_media
@@ -298,6 +331,7 @@ class WeChatNativeAdapter(Platform):
         for name, store, seconds in (
             ("image", self._recent_group_images, RECENT_GROUP_IMAGE_SECONDS),
             ("pdf", self._recent_group_pdfs, RECENT_GROUP_PDF_SECONDS),
+            ("voice", self._recent_group_voices, RECENT_GROUP_VOICE_SECONDS),
         ):
             source = store.get(key)
             if source and time.time() - source["timestamp"] > seconds:
@@ -312,7 +346,14 @@ class WeChatNativeAdapter(Platform):
         file_asked = bool(re.search(r"(?i)pdf", prompt)) or (
             sources["pdf"] is not None and bool(re.search(r"文件|文档|论文|这份|那份", prompt))
         )
-        wanted = [name for name, asked in (("image", image_asked), ("pdf", file_asked)) if asked]
+        voice_asked = bool(
+            re.search(r"语音|录音|音频|听听|听一下|转文字|转成文字|说了啥|说了什么", prompt)
+        )
+        wanted = [
+            name
+            for name, asked in (("image", image_asked), ("pdf", file_asked), ("voice", voice_asked))
+            if asked
+        ]
         if not wanted:
             present = [name for name, source in sources.items() if source]
             if prompt.strip() or not present:
@@ -330,7 +371,8 @@ class WeChatNativeAdapter(Platform):
     async def _check_quote_original(
         self, raw: dict, wrapped: WeChatNativeEvent, original_id: str
     ) -> None:
-        pdf = wrapped.get_extra("wechat_native_media_kind") == "pdf"
+        media_kind = wrapped.get_extra("wechat_native_media_kind") or "image"
+        pdf = media_kind == "pdf"
         quote = wrapped.get_extra("wechat_native_recent_image") or raw["quote"]
         original = await self.client.message(original_id)
         if (
@@ -339,10 +381,10 @@ class WeChatNativeAdapter(Platform):
             or original.get("threadId") != raw["threadId"]
             or original.get("serverId") != quote["serverId"]
             or original.get("senderId") != quote["senderId"]
-            or original.get("type") != (49 if pdf else 3)
+            or original.get("type") != {"pdf": 49, "image": 3, "voice": 34}[media_kind]
             or (pdf and original.get("appMessageType") != 6)
         ):
-            raise MediaError("unavailable", media_kind="pdf" if pdf else "image")
+            raise MediaError("unavailable", media_kind=media_kind)
         if (
             original.get("recall") is not None
             or self.state.message_status(original_id) == "recalled"
@@ -370,18 +412,20 @@ class WeChatNativeAdapter(Platform):
             raise fail("unavailable")
         original_id = self.state.find_message_id(raw["threadId"], quote["serverId"])
         if original_id is None:
-            raise fail("unavailable" if recent or not pdf else "expired")
+            raise fail("unavailable" if recent or media_kind == "image" else "expired")
         try:
             guard()
             await self._check_quote_original(raw, wrapped, original_id)
             guard()
-            if not recent and not pdf:
+            if not recent and media_kind == "image":
                 logger.warning(
                     "WeChat Native 引用媒体元数据无效，回退同聊天原图：message=%s original=%s",
                     raw["id"],
                     original_id,
                 )
-            if pdf:
+            if media_kind == "voice":
+                payload = await self.client.fetch_voice(original_id, guard=guard)
+            elif pdf:
                 payload = await self.client.fetch_pdf(original_id, guard=guard)
             else:
                 payload = await self.client.fetch_image(original_id, guard=guard)
@@ -414,7 +458,7 @@ class WeChatNativeAdapter(Platform):
             )
             or current_quote.get("state") == "recalled"
         )
-        if not pdf:
+        if media_kind == "image":
             # Native embeds the image itself; a quote of a file is always "unsupported".
             quote_changed = (
                 quote_changed
@@ -437,7 +481,8 @@ class WeChatNativeAdapter(Platform):
         is_quote = raw.get("type") == 49 and raw.get("appMessageType") == 57
         media_kind = wrapped.get_extra("wechat_native_media_kind") or "image"
         is_pdf = media_kind == "pdf"
-        label = "PDF" if is_pdf else "图片"
+        is_voice = media_kind == "voice"
+        label = {"pdf": "PDF", "voice": "语音", "image": "图片"}[media_kind]
         recent_request = wrapped.get_extra("wechat_native_recent_image_request")
 
         def guard() -> None:
@@ -460,15 +505,26 @@ class WeChatNativeAdapter(Platform):
                     raise MediaError("recent_unavailable", media_kind=media_kind)
                 if is_quote:
                     quote = raw.get("quote")
-                    if not isinstance(quote, dict) or quote.get("type") != (49 if is_pdf else 3):
+                    if (
+                        not isinstance(quote, dict)
+                        or quote.get("type") != {"pdf": 49, "voice": 34, "image": 3}[media_kind]
+                    ):
                         raise MediaError("unavailable", media_kind=media_kind)
                     state = quote.get("state")
-                    logger.debug(
-                        "WeChat Native 引用图片检查：message=%s state=%s embedded_image=%s",
-                        message_id,
-                        state,
-                        quote.get("embeddedImage") is True,
-                    )
+                    if media_kind == "image":
+                        logger.debug(
+                            "WeChat Native 引用图片检查：message=%s state=%s embedded_image=%s",
+                            message_id,
+                            state,
+                            quote.get("embeddedImage") is True,
+                        )
+                    else:
+                        logger.debug(
+                            "WeChat Native 引用%s检查：message=%s state=%s",
+                            label,
+                            message_id,
+                            state,
+                        )
                     if state == "recalled":
                         wrapped.set_extra("wechat_native_quote_invalidated", True)
                         wrapped.stop_event()
@@ -478,16 +534,32 @@ class WeChatNativeAdapter(Platform):
                         ):
                             self.state.mark_message(message_id, "no_reply")
                         return
-                    if not is_pdf and state == "unsupported":
+                    if media_kind == "image" and state == "unsupported":
                         raise MediaError("unsupported_format")
-                    if not is_pdf and (
+                    if media_kind == "image" and (
                         state != "embedded" or quote.get("embeddedImage") is not True
                     ):
                         raise MediaError("expired")
-                image_bytes = pdf_name = pdf_text = None
+                image_bytes = pdf_name = pdf_text = voice_bytes = None
                 try:
                     async with asyncio.timeout(self.client.media_timeout):
-                        if is_pdf:
+                        if is_voice:
+                            if is_quote or recent_request:
+                                voice_bytes = await self._fetch_quote_original(
+                                    raw, wrapped, guard, "voice"
+                                )
+                            else:
+                                voice_bytes = await self.client.fetch_voice(message_id, guard=guard)
+                            latest = await self.client.message(message_id)
+                            guard()
+                            if any(
+                                latest.get(key) != raw.get(key)
+                                for key in ("id", "accountId", "threadId", "serverId")
+                            ):
+                                raise MediaError("unavailable", media_kind="voice")
+                            if latest.get("recall") is not None:
+                                raise MediaError("recalled", media_kind="voice")
+                        elif is_pdf:
                             if is_quote or recent_request:
                                 pdf_data, pdf_name = await self._fetch_quote_original(
                                     raw, wrapped, guard, "pdf"
@@ -515,7 +587,9 @@ class WeChatNativeAdapter(Platform):
                 except TimeoutError:
                     raise MediaError("unavailable", media_kind=media_kind) from None
                 guard()
-                payload_size = len(pdf_text) if is_pdf else len(image_bytes)
+                payload_size = (
+                    len(pdf_text) if is_pdf else len(voice_bytes if is_voice else image_bytes)
+                )
                 logger.debug(
                     "WeChat Native %s处理完成：message=%s size=%s", label, message_id, payload_size
                 )
@@ -525,6 +599,7 @@ class WeChatNativeAdapter(Platform):
                     self.bot_self_id,
                     image_bytes=image_bytes,
                     pdf_name=pdf_name,
+                    voice_bytes=voice_bytes,
                 )
                 event = WeChatNativeEvent(enriched, self)
                 event.set_extra("wechat_native_media_kind", media_kind)
@@ -614,7 +689,7 @@ class WeChatNativeAdapter(Platform):
                     event=wrapped,
                 )
                 logger.debug(
-                    "WeChat Native 图片错误提示发送结果：message=%s sent=%s", message_id, sent
+                    "WeChat Native %s错误提示发送结果：message=%s sent=%s", label, message_id, sent
                 )
                 if (
                     not sent
@@ -624,7 +699,8 @@ class WeChatNativeAdapter(Platform):
                     self.state.mark_message(message_id, "no_reply")
             except (Exception, asyncio.CancelledError) as send_err:
                 logger.error(
-                    "WeChat Native 图片错误提示发送失败：message=%s error_type=%s",
+                    "WeChat Native %s错误提示发送失败：message=%s error_type=%s",
+                    label,
                     message_id,
                     type(send_err).__name__,
                 )
@@ -639,7 +715,7 @@ class WeChatNativeAdapter(Platform):
                     raise
         except asyncio.CancelledError:
             logger.debug(
-                "WeChat Native 图片任务取消：message=%s stopped=%s", message_id, self.stopped
+                "WeChat Native %s任务取消：message=%s stopped=%s", label, message_id, self.stopped
             )
             if not self._state_closed and self.state.message_status(message_id) == "queued":
                 self.state.mark_message(message_id, "needs_review")
@@ -649,7 +725,8 @@ class WeChatNativeAdapter(Platform):
             if not self._state_closed and self.state.message_status(message_id) == "queued":
                 self.state.mark_message(message_id, "needs_review")
             logger.error(
-                "WeChat Native 图片处理失败：message=%s error_type=%s；消息标识已保留，需人工检查",
+                "WeChat Native %s处理失败：message=%s error_type=%s；消息标识已保留，需人工检查",
+                label,
                 message_id,
                 type(error).__name__,
             )
@@ -682,7 +759,11 @@ class WeChatNativeAdapter(Platform):
                 raise ValueError("invalid_recall_identity")
             self.state.recall(thread, server_id, message_id)
             self.summary_cache.recall(thread, server_id)
-            for store in (self._recent_group_images, self._recent_group_pdfs):
+            for store in (
+                self._recent_group_images,
+                self._recent_group_pdfs,
+                self._recent_group_voices,
+            ):
                 for key, source in list(store.items()):
                     if key[0] == thread and source["serverId"] == server_id:
                         store.pop(key)
@@ -791,7 +872,10 @@ class WeChatNativeAdapter(Platform):
                 "wechat_native_media_kind",
                 recent_kind
                 or (
-                    "pdf"
+                    "voice"
+                    if raw.get("type") == 34
+                    or (isinstance(quote, dict) and quote.get("type") == 34)
+                    else "pdf"
                     if raw.get("type") == 49
                     and (
                         raw.get("appMessageType") == 6
@@ -808,8 +892,12 @@ class WeChatNativeAdapter(Platform):
             wrapped.set_extra("wechat_native_media_task", task)
             self._media_tasks.add(task)
             task.add_done_callback(self._media_tasks.discard)
+            media_label = {"pdf": "PDF", "voice": "语音", "image": "图片"}.get(
+                wrapped.get_extra("wechat_native_media_kind"), "媒体"
+            )
             logger.debug(
-                "WeChat Native 图片任务已调度：message=%s pending_tasks=%s",
+                "WeChat Native %s任务已调度：message=%s pending_tasks=%s",
+                media_label,
                 message_id,
                 len(self._media_tasks),
             )
@@ -867,13 +955,30 @@ class WeChatNativeAdapter(Platform):
                 if event and event.get_extra("wechat_native_quote_invalidated"):
                     event.stop_event()
                     return False
-                text, mentions, reply_id = serialize_text(chain, group=thread.endswith("@chatroom"))
-                if not text.strip():
+                parts, mentions, reply_id = serialize_chain(
+                    chain, group=thread.endswith("@chatroom")
+                )
+                if not parts:
                     return False
-                if len(text.encode()) > 65536:
-                    raise ValueError("Native 文本超过 64 KiB，未发送")
-                if reply_id is not None and len(text.encode()) > 16384:
-                    raise ValueError("Native 引用回复文本超过 16 KiB，未发送")
+                has_text = any(isinstance(part, str) for part in parts)
+                if (
+                    source
+                    and thread.endswith("@chatroom")
+                    and has_text
+                    and self.native_config.group_reply_style == "quote"
+                    and reply_id is None
+                    and self.state.message_status(source["id"]) != "replied"
+                ):
+                    reply_id = source["id"]
+                for part in parts:
+                    if isinstance(part, str) and len(part.encode()) > 65536:
+                        raise ValueError("Native 文本超过 64 KiB，未发送")
+                    if (
+                        isinstance(part, str)
+                        and reply_id is not None
+                        and len(part.encode()) > 16384
+                    ):
+                        raise ValueError("Native 引用回复文本超过 16 KiB，未发送")
                 if self.client.closed:
                     raise ValueError("Native 客户端未连接，未提交发送")
                 message_id = source["id"] if source else None
@@ -888,7 +993,9 @@ class WeChatNativeAdapter(Platform):
                         return False
                     if (
                         thread.endswith("@chatroom")
+                        and self.native_config.group_reply_style == "mention"
                         and mentions is None
+                        and has_text
                         and source_status != "replied"
                     ):
                         mentions = {"userIds": [source["senderId"]]}
@@ -994,39 +1101,148 @@ class WeChatNativeAdapter(Platform):
                     self.state.mark_message(message_id, "no_reply")
                     event.stop_event()
                     return False
-                key = "astrbot-" + uuid.uuid4().hex
-                self.state.begin_send(key, message_id, thread)
-                logger.debug(
-                    "WeChat Native 开始发送回复：message=%s receipt_key=%s", message_id, key
-                )
-                try:
-                    receipt = await self.client.send_text(thread, text, key, mentions, quote=quote)
-                except BaseException as error:
-                    state = "needs_review"
-                    if isinstance(error, SendError) and error.state in {"failed", "cancelled"}:
-                        state = error.state
-                    elif isinstance(error, NativeAPIError) and 400 <= error.status < 500:
-                        state = "failed"
-                    send_id = error.send_id if isinstance(error, SendError) else None
-                    self.state.finish_send(key, state, send_id)
-                    if message_id:
-                        self.state.mark_message(
-                            message_id, "failed" if state == "cancelled" else state
+
+                async def check_current_source():
+                    # Downloads/uploads can overlap recalls; recheck before every submission.
+                    if self.stopped:
+                        raise RuntimeError("WeChat Native 已停止")
+                    if source:
+                        status = self.state.message_status(message_id)
+                        if status in {"needs_review", "failed", "partial", "recalled"}:
+                            raise ValueError("回复来源已撤回或需人工检查，未提交发送")
+                        latest = await self.client.message(message_id)
+                        if self.state.message_status(message_id) in {
+                            "needs_review",
+                            "failed",
+                            "partial",
+                            "recalled",
+                        }:
+                            raise ValueError("回复来源已撤回或需人工检查，未提交发送")
+                        if (
+                            latest.get("id") != message_id
+                            or latest.get("accountId") != self.native_config.account_id
+                            or latest.get("threadId") != thread
+                            or latest.get("serverId") != source.get("serverId")
+                        ):
+                            raise ValueError("reply_source_identity_mismatch")
+                        if latest.get("recall") is not None:
+                            self.state.recall(thread, source.get("serverId"), message_id)
+                            if event:
+                                event.stop_event()
+                            raise ValueError("回复来源已撤回，未提交发送")
+                        original_quote = source.get("quote")
+                        latest_quote = latest.get("quote")
+                        if isinstance(original_quote, dict) and (
+                            not isinstance(latest_quote, dict)
+                            or latest_quote.get("serverId") != original_quote.get("serverId")
+                            or latest_quote.get("state") == "recalled"
+                        ):
+                            raise ValueError("引用来源已变化或撤回，未提交发送")
+                        original_id = (
+                            event.get_extra("wechat_native_quote_original_id") if event else None
                         )
-                    logger.error(
-                        "WeChat Native 回复未确认；状态 %s，回执键 %s。请检查状态库，勿盲目重发",
-                        state,
-                        key,
+                        if original_id:
+                            await self._check_quote_original(source, event, original_id)
+                    if event and event.get_extra("wechat_native_quote_invalidated"):
+                        raise ValueError("引用来源已失效，未提交发送")
+                    if records is not None and not self.summary_cache.contains(records):
+                        raise ValueError("摘要来源已失效，未提交发送")
+                    if quote:
+                        target = await self.client.message(quote["messageId"])
+                        if (
+                            target.get("id") != quote["messageId"]
+                            or target.get("accountId") != self.native_config.account_id
+                            or target.get("threadId") != thread
+                            or target.get("serverId") != quote["serverId"]
+                            or target.get("recall") is not None
+                            or self.state.message_status(quote["messageId"]) == "recalled"
+                        ):
+                            raise ValueError("Native 引用来源已失效，未提交发送")
+
+                for index, part in enumerate(parts):
+                    # Resolve each image with bounded memory, before recording an intent.
+                    # No later component is attempted after a failure or unknown outcome.
+                    if not isinstance(part, str):
+                        loader = (
+                            load_outgoing_voice if isinstance(part, Record) else load_outgoing_image
+                        )
+                        data, content_type = await loader(part)
+                    key = "astrbot-" + uuid.uuid4().hex
+                    self.state.begin_send(key, message_id, thread)
+                    logger.debug(
+                        "WeChat Native 开始发送回复：message=%s receipt_key=%s", message_id, key
                     )
-                    raise
-                self.state.finish_send(key, "accepted", receipt["id"])
-                if message_id:
-                    self.state.mark_message(message_id, "replied")
-                logger.info(
-                    "WeChat Native 回复已被 Native 接受：message=%s send=%s",
-                    message_id,
-                    receipt["id"],
-                )
+                    try:
+                        if index or not isinstance(part, str):
+                            await check_current_source()
+                        if isinstance(part, str):
+                            receipt = await self.client.send_text(
+                                thread, part, key, mentions, quote=quote
+                            )
+                            mentions, quote = None, None
+                        elif isinstance(part, Record):
+                            receipt = await self.client.send_voice(
+                                thread,
+                                data,
+                                content_type,
+                                key,
+                                record_job=lambda job_id: self.state.record_send_id(key, job_id),
+                                before_send=check_current_source,
+                                record_chunks=lambda chunks: self.state.record_voice_chunks(
+                                    key, chunks
+                                ),
+                            )
+                        else:
+                            receipt = await self.client.send_image(
+                                thread,
+                                data,
+                                content_type,
+                                key,
+                                record_job=lambda job_id: self.state.record_send_id(key, job_id),
+                                before_send=check_current_source,
+                            )
+                    except BaseException as error:
+                        state = "needs_review"
+                        if isinstance(error, SendError) and error.state in {
+                            "failed",
+                            "cancelled",
+                            "partial",
+                        }:
+                            state = error.state
+                        elif isinstance(error, ValueError) or (
+                            isinstance(error, NativeAPIError)
+                            and 400 <= error.status < 500
+                            and error.status not in {408, 429}
+                        ):
+                            state = "failed"
+                        send_id = error.send_id if isinstance(error, SendError) else None
+                        self.state.finish_send(key, state, send_id)
+                        if message_id:
+                            self.state.mark_message(
+                                message_id,
+                                "partial"
+                                if any(
+                                    c["state"] == "accepted" for c in self.state.voice_chunks(key)
+                                )
+                                else "failed"
+                                if state == "cancelled"
+                                else state,
+                            )
+                        logger.error(
+                            "WeChat Native 回复未确认；状态 %s，回执键 %s。"
+                            "请检查状态库，勿盲目重发",
+                            state,
+                            key,
+                        )
+                        raise
+                    self.state.finish_send(key, "accepted", receipt["id"])
+                    if message_id:
+                        self.state.mark_message(message_id, "replied")
+                    logger.info(
+                        "WeChat Native 回复已被 Native 接受：message=%s send=%s",
+                        message_id,
+                        receipt["id"],
+                    )
                 return True
         finally:
             self._send_tasks.discard(task)
@@ -1059,6 +1275,7 @@ class WeChatNativeAdapter(Platform):
         self.summary_cache.clear()
         self._recent_group_images.clear()
         self._recent_group_pdfs.clear()
+        self._recent_group_voices.clear()
         await self.client.close()
         self.state.close()
         self._state_closed = True
