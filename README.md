@@ -93,6 +93,27 @@ URL 图片仅允许公网 HTTP(S) 和 80/443 端口，不携带 Native Token、C
 
 ### 微信语音收发
 
+要让机器人听懂语音并用语音回复，需要在 AstrBot 中分别配置 **Speech to Text（STT/ASR，语音转文字）**
+和 **Text to Speech（TTS，文字转语音）** 服务提供商，并在机器人使用的配置中启用、选择对应服务。
+只需要识别收到的语音时，配置 STT 即可；需要将回复合成为语音时，再配置 TTS。
+
+推荐使用作者的两个开源项目，在本地部署语音服务。两者均支持 CPU 运行和 Docker Compose 部署：
+
+| 用途 | 推荐项目 | 接口与配置示例 |
+| --- | --- | --- |
+| STT：将收到的微信语音转成文字 | [funasr-openai-stt](https://github.com/neozhu/funasr-openai-stt) | 基于 FunASR SenseVoiceSmall，支持中文、英文和中英混合语音。OpenAI 兼容 Base URL 为 `http://<服务地址>:8000/v1`，模型可填 `whisper-1`，API Key 使用服务端 `ASR_API_KEYS` 中配置的密钥。 |
+| TTS：将机器人的文字回复合成为语音 | [kokoro-speech-service](https://github.com/neozhu/kokoro-speech-service) | 基于 Kokoro-ONNX，提供 `POST /v1/audio/speech`。Base URL 为 `http://<服务地址>:48731/v1`，API Key 与服务端 `TTS_API_KEY` 一致，音频格式选择 `wav`；音色按服务支持的列表选择，项目默认示例为英文音色 `af_sarah`。 |
+
+1. 按各项目 README 部署服务、下载模型并设置 API Key。
+2. 在 AstrBot 中添加 OpenAI 兼容的 STT、TTS 提供商，分别填写上表中的服务地址和密钥。
+   在机器人使用的配置中开启语音转文字、文字转语音，并选择刚添加的提供商。
+3. TTS 建议设置 `provider_tts_settings.use_file_service: false`，让插件直接读取 AstrBot 生成的本地音频文件。
+   先在私聊中发送一条微信语音测试识别，再测试语音回复。
+
+上表端口使用各项目的默认配置。`<服务地址>` 必须能从 AstrBot 访问；Docker 部署时，
+`127.0.0.1` 指向 AstrBot 容器自身。采用本文的 host 网络部署时，可用它访问同一主机上的服务。
+服务部署在其他容器或主机时，填写可达的容器服务名或主机地址。模型下载和完整参数见对应项目 README。
+
 **接收语音**使用现有 `enable_media` 开关（默认开启）。插件识别微信 `type=34`，
 通过 Native Media API 获取 `normal` 变体，由 Native 将 SILK 解码为 **16 kHz、单声道、16 位 PCM WAV**。
 校验账号、消息、资产身份、大小和 SHA-256 后，生成标准 AstrBot `Record`，
