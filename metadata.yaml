@@ -9,7 +9,7 @@ desc: |
   需要运行并登录 agent-wechat-native，配置 API 地址、账号 ID 和 Token；图片识别需要支持视觉的模型。文件收发暂不支持。详细配置与使用方法请参阅项目 README。
 version: 0.2.7
 author: neozhu
-repo: https://github.com/Wings-030/astrbot-plugin-wechat-native
+repo: https://github.com/neozhu/astrbot-plugin-wechat-native
 astrbot_version: ">=4.29.3,<5"
 social_link: https://github.com/neozhu
 tags:
