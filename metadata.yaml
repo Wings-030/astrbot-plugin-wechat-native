@@ -7,12 +7,15 @@ desc: |
   支持文本私聊、群聊 @回复、图片识别与发送、微信语音收发（语音识别使用 AstrBot 配置的 ASR）、PDF 解析、群聊摘要和原生引用回复，并提供白名单、独立会话、断线重连和持久化去重。
 
   需要运行并登录 agent-wechat-native，配置 API 地址、账号 ID 和 Token；图片识别需要支持视觉的模型。文件收发暂不支持。详细配置与使用方法请参阅项目 README。
-version: 0.2.8
+version: 0.2.9
 author: neozhu
 category: utilities
 repo: https://github.com/neozhu/astrbot-plugin-wechat-native
 astrbot_version: ">=4.29.3,<5"
 social_link: https://github.com/neozhu
+support_platforms:
+  - weixin_oc
+  - weixin_official_account
 tags:
   - 个人微信
   - 平台适配器
