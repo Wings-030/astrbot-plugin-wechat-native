@@ -7,6 +7,8 @@
 
 适配版本：**AstrBot >=4.29.3,<5、Native v1.4.0**；插件运行需要 **Python 3.12+**。
 
+![微信消息接入 AstrBot 的架构图](docs/wechat-native-diagram.png)
+
 ## 安装与配置
 
 1. 启动 Native 并登录微信；全新 Docker 部署按下一节操作。
