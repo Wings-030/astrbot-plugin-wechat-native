@@ -98,7 +98,10 @@ CONFIG_METADATA = {
         "description": "群聊回复方式",
         "options": ["mention", "quote", "plain"],
         "labels": ["@触发者", "引用触发消息", "直接发送"],
-        "hint": "首段回复自动 @或引用，也可直接发送；纯图片/语音直接发送。插件显式添加的 @和引用仍保留。",
+        "hint": (
+            "首段回复自动 @或引用，也可直接发送；纯图片/语音直接发送。"
+            "插件显式添加的 @和引用仍保留。"
+        ),
     },
     "allowed_groups": {
         "type": "list",
