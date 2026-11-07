@@ -39,6 +39,12 @@ class StateStore:
             CREATE TABLE IF NOT EXISTS cooldowns (
                 account TEXT NOT NULL, thread TEXT NOT NULL, until REAL NOT NULL,
                 PRIMARY KEY(account, thread));
+            CREATE TABLE IF NOT EXISTS action_intents (
+                account TEXT NOT NULL, thread TEXT NOT NULL, trigger TEXT NOT NULL,
+                action TEXT NOT NULL, key TEXT NOT NULL UNIQUE, param_hash TEXT NOT NULL,
+                target TEXT NOT NULL, server_id TEXT, own_sender TEXT NOT NULL,
+                operation_id TEXT, status TEXT NOT NULL, created REAL NOT NULL,
+                PRIMARY KEY(account, thread, trigger));
             CREATE TABLE IF NOT EXISTS recalls (
                 thread TEXT NOT NULL, server_id TEXT NOT NULL, PRIMARY KEY(thread, server_id));
             CREATE TABLE IF NOT EXISTS messages (
@@ -73,6 +79,71 @@ class StateStore:
             "SELECT until FROM cooldowns WHERE account=? AND thread=?", (account, thread)
         ).fetchone()
         return row[0] if row else 0.0
+
+    def action_intent(self, account, thread, trigger):
+        row = self.db.execute(
+            "SELECT * FROM action_intents WHERE account=? AND thread=? AND trigger=?",
+            (account, thread, trigger),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def claim_action(
+        self,
+        account,
+        thread,
+        trigger,
+        action,
+        key,
+        param_hash,
+        target,
+        server_id,
+        own_sender,
+        created,
+    ):
+        with self.db:
+            inserted = self.db.execute(
+                "INSERT OR IGNORE INTO action_intents VALUES "
+                "(?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'needs_review', ?)",
+                (
+                    account,
+                    thread,
+                    trigger,
+                    action,
+                    key,
+                    param_hash,
+                    target,
+                    server_id,
+                    own_sender,
+                    created,
+                ),
+            ).rowcount
+        return bool(inserted)
+
+    def finish_action(self, key, status, operation_id=None):
+        with self.db:
+            self.db.execute(
+                "UPDATE action_intents SET status=?, "
+                "operation_id=COALESCE(?, operation_id) WHERE key=?",
+                (status, operation_id, key),
+            )
+
+    def recent_action(self, account, thread, action):
+        row = self.db.execute(
+            "SELECT * FROM action_intents WHERE account=? AND thread=? AND action=? "
+            "ORDER BY created DESC LIMIT 1",
+            (account, thread, action),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def pending_actions(self, account):
+        return [
+            dict(row)
+            for row in self.db.execute(
+                "SELECT * FROM action_intents WHERE account=? "
+                "AND status IN ('pending','needs_review') ORDER BY created LIMIT 100",
+                (account,),
+            )
+        ]
 
     def set_cooldown(self, account: str, thread: str, until: float):
         with self.db:

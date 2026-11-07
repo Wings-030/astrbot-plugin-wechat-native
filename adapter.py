@@ -8,6 +8,7 @@ import time
 import uuid
 import weakref
 from collections import OrderedDict
+from dataclasses import replace
 from pathlib import Path
 
 from astrbot.api import logger
@@ -58,6 +59,7 @@ from .native_client import (
 )
 from .state import StateStore, cursor_number
 from .summary import GroupSummaryCache, is_summary_command
+from .wechat_actions import WeChatActions
 
 
 @register_platform_adapter(
@@ -85,6 +87,10 @@ class WeChatNativeAdapter(Platform):
         self.native_config = NativeConfig.from_dict(platform_config)
         cfg = self.native_config
         self.client = NativeClient(cfg.api_url, cfg.account_id, cfg.load_token())
+        self.admin_client = None
+        if cfg.enable_wechat_actions and cfg.admin_token_file:
+            admin_token = replace(cfg, token="", token_file=cfg.admin_token_file).load_token()
+            self.admin_client = NativeClient(cfg.api_url, cfg.account_id, admin_token)
         # PlatformManager owns client_self_id (its instance/task UUID).
         self.bot_self_id = cfg.account_id
         root = state_dir if state_dir is not None else StarTools.get_data_dir(PLUGIN_ID)
@@ -105,6 +111,7 @@ class WeChatNativeAdapter(Platform):
         self._send_lock = asyncio.Lock()
         self.loop_guard = LoopGuard(self.state, cfg.account_id)
         self.history = HistoryTools(self)
+        self.actions = WeChatActions(self)
         self._terminate_lock = asyncio.Lock()
         self._last_time_warning = float("-inf")
         self.summary_cache = GroupSummaryCache(cfg.summary_max_messages, cfg.summary_window_minutes)
@@ -925,6 +932,7 @@ class WeChatNativeAdapter(Platform):
         delay = self.reconnect_delay
         try:
             await self.client.open()
+            recovery = None
             while not self.stopped:
                 try:
                     # Recheck on every connection, including initial transient failures.
@@ -934,6 +942,10 @@ class WeChatNativeAdapter(Platform):
                     status = await self.client.status()
                     self.state.bind_server(status.get("serverId"))
                     self.bot_self_id = account.get("ownUsername") or self.native_config.account_id
+                    if recovery is None:
+                        recovery = asyncio.create_task(self.actions.recover())
+                        self.actions.tasks.add(recovery)
+                        recovery.add_done_callback(self.actions.tasks.discard)
                     if not account.get("authenticated") or account.get("connection") != "online":
                         logger.warning("WeChat Native 账号尚未在线；等待 Native 恢复连接")
                     async for event in self.client.events(self.state.cursor):
@@ -960,6 +972,8 @@ class WeChatNativeAdapter(Platform):
                 raise
         finally:
             await self.client.close()
+            if self.admin_client:
+                await self.admin_client.close()
 
     async def send_chain(self, thread: str, chain, *, source=None, event=None) -> bool:
         if self.stopped:
@@ -1312,7 +1326,11 @@ class WeChatNativeAdapter(Platform):
             return
         self.stopped = True
         current = asyncio.current_task()
-        tasks = {task for task in (self._send_tasks | self._media_tasks) if task is not current}
+        tasks = {
+            task
+            for task in (self._send_tasks | self._media_tasks | self.actions.tasks)
+            if task is not current
+        }
         if self._run_task and self._run_task is not current:
             tasks.add(self._run_task)
         for task in tasks:
@@ -1326,5 +1344,7 @@ class WeChatNativeAdapter(Platform):
         self._recent_group_pdfs.clear()
         self._recent_group_voices.clear()
         await self.client.close()
+        if self.admin_client:
+            await self.admin_client.close()
         self.state.close()
         self._state_closed = True

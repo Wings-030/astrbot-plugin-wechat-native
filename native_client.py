@@ -794,6 +794,24 @@ class NativeClient:
             "GET", self.prefix + "/groups/" + quote(thread, safe="") + "/members", params=params
         )
 
+    async def set_my_group_name(self, thread: str, name: str, key: str):
+        return await self._request(
+            "PUT",
+            self.prefix + "/groups/" + quote(thread, safe="") + "/my-name",
+            json={"displayName": name},
+            headers={"Idempotency-Key": key},
+        )
+
+    async def operation(self, operation_id: str):
+        return await self._request(
+            "GET", self.prefix + "/operations/" + quote(operation_id, safe="")
+        )
+
+    async def group_mutation_by_key(self, key: str):
+        return await self._request(
+            "GET", self.prefix + "/group-mutations/by-idempotency-key", params={"key": key}
+        )
+
     async def media_assets(self, message_id: str) -> dict:
         return await self._request(
             "GET", self.prefix + "/messages/" + quote(message_id, safe="") + "/media"

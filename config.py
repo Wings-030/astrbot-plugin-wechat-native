@@ -42,11 +42,17 @@ DEFAULT_CONFIG = {
     "unique_session": True,
     "enable_group_summary": False,
     "enable_history_tools": False,
+    "enable_wechat_actions": False,
+    "wechat_action_admins": [],
+    "admin_token_file": "",
     "summary_max_messages": 200,
     "summary_window_minutes": 60,
 }
 
 CONFIG_METADATA = {
+    "enable_wechat_actions": {"type": "bool", "description": "启用微信修改与撤回工具"},
+    "wechat_action_admins": {"type": "list", "description": "群改名与撤回管理员 senderId 白名单"},
+    "admin_token_file": {"type": "string", "description": "群管理专用 admin Token 文件路径"},
     "enable_history_tools": {"type": "bool", "description": "启用当前聊天历史与群资料工具"},
     "logo_token": {"type": "string", "invisible": True},
     "server_url": {
@@ -148,6 +154,9 @@ class NativeConfig:
     unique_session: bool = True
     enable_group_summary: bool = False
     enable_history_tools: bool = False
+    enable_wechat_actions: bool = False
+    wechat_action_admins: frozenset[str] = frozenset()
+    admin_token_file: str = field(default="", repr=False)
     summary_max_messages: int = 200
     summary_window_minutes: int = 60
 
@@ -183,6 +192,7 @@ class NativeConfig:
             "unique_session",
             "enable_group_summary",
             "enable_history_tools",
+            "enable_wechat_actions",
         ):
             if key in data and not isinstance(data[key], bool):
                 raise ValueError(f"{key} 必须是布尔值")
@@ -194,11 +204,13 @@ class NativeConfig:
             if type(value) is not int or not 1 <= value <= maximum:
                 raise ValueError(f"{key} 必须是 1–{maximum} 的整数")
         lists = {}
-        for key in ("allowed_users", "allowed_groups"):
+        for key in ("allowed_users", "allowed_groups", "wechat_action_admins"):
             value = data.get(key, [])
             if not isinstance(value, list) or any(not isinstance(x, str) or not x for x in value):
                 raise ValueError(f"{key} 必须是非空字符串的列表")
             lists[key] = frozenset(value)
+        if not isinstance(data.get("admin_token_file", ""), str):
+            raise ValueError("admin_token_file 必须是文件路径字符串")
         return cls(
             api_url=url if parsed.path.endswith("/v1") else url + "/v1",
             account_id=account.strip(),
@@ -211,6 +223,8 @@ class NativeConfig:
             unique_session=data.get("unique_session", True),
             enable_group_summary=data.get("enable_group_summary", False),
             enable_history_tools=data.get("enable_history_tools", False),
+            enable_wechat_actions=data.get("enable_wechat_actions", False),
+            admin_token_file=data.get("admin_token_file", ""),
             summary_max_messages=data.get("summary_max_messages", 200),
             summary_window_minutes=data.get("summary_window_minutes", 60),
             **lists,
