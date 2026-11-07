@@ -9,7 +9,7 @@ desc: |
   Native v1.5.1 增加当前聊天历史/群资料工具、受权限控制的群昵称/群改名/自身消息撤回，以及默认开启的静默循环熔断；读写工具默认关闭。
 
   需要运行并登录 agent-wechat-native，配置 API 地址、账号 ID 和 Token；图片识别需要支持视觉的模型。文件收发暂不支持。详细配置与使用方法请参阅项目 README。
-version: 0.3.0
+version: 0.3.1
 author: neozhu
 category: utilities
 repo: https://github.com/neozhu/astrbot-plugin-wechat-native
