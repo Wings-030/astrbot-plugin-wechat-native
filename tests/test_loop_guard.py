@@ -75,3 +75,48 @@ async def test_queued_event_cannot_reply_after_trip(serve, tmp_path):
         assert adapter.state.message_status(msg["id"]) == "recalled"
     finally:
         await adapter.terminate()
+
+
+async def test_repeating_round_trips_trip_before_hard_cap(tmp_path):
+    state = module("state").StateStore(tmp_path / "loop.sqlite3")
+    guard = module("loop_guard").LoopGuard(state, "a", clock=lambda: 1000)
+    try:
+        for i in range(3):
+            guard.incoming("peer", str(i), "  Ｈｅｌｌｏ   世界 ")
+            guard.outgoing("peer", f"out-{i}", "你好 世界", trigger=str(i))
+        assert guard.blocked("peer")
+        assert not guard.blocked("other")
+    finally:
+        state.close()
+
+
+async def test_inbound_flood_and_ordinary_conversation_do_not_trip(tmp_path):
+    state = module("state").StateStore(tmp_path / "loop.sqlite3")
+    guard = module("loop_guard").LoopGuard(state, "a", clock=lambda: 1000)
+    try:
+        for i in range(100):
+            guard.incoming("peer", str(i), "同样的话")
+        assert not guard.blocked("peer")
+        for i in range(3):
+            guard.incoming("other", str(i), ["今天好吗", "几点吃饭", "晚安"][i])
+            guard.outgoing("other", f"out-{i}", ["挺好", "十二点", "好梦"][i], trigger=str(i))
+        assert not guard.blocked("other")
+    finally:
+        state.close()
+
+
+async def test_adapter_associates_repeated_replies_with_real_incoming(serve, tmp_path):
+    adapter, queue, msg, sent = await make_adapter(serve, tmp_path)
+    try:
+        for i in range(3):
+            msg.update(id=f"in-{i}", serverId=str(900 + i), body="hello")
+            await adapter.process_native_event(native_event(msg, str(i + 1)))
+            await queue.get_nowait().send(MessageChain([Plain("hi")]))
+        assert len(sent) == 3
+        assert adapter.loop_guard.blocked("peer")
+        msg.update(id="in-4", serverId="904")
+        await adapter.process_native_event(native_event(msg, "4"))
+        assert queue.empty()
+        assert adapter.state.cursor == "4"
+    finally:
+        await adapter.terminate()

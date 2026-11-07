@@ -870,6 +870,7 @@ class WeChatNativeAdapter(Platform):
         if fresh and cacheable and not is_summary_command(converted.message_str):
             self.summary_cache.add(raw)
         if fresh and kind == "text":
+            self.loop_guard.incoming(thread, message_id, converted.message_str)
             wrapped = WeChatNativeEvent(converted, self)
             try:
                 self.commit_event(wrapped)
@@ -880,6 +881,7 @@ class WeChatNativeAdapter(Platform):
             self._events[message_id] = wrapped
             logger.debug("WeChat Native 文本已交付 AstrBot：message=%s", message_id)
         elif fresh and kind == "media":
+            self.loop_guard.incoming(thread, message_id, converted.message_str)
             wrapped = WeChatNativeEvent(converted, self)
             quote = raw.get("quote")
             wrapped.set_extra(
@@ -1276,7 +1278,10 @@ class WeChatNativeAdapter(Platform):
                         raise
                     self.state.finish_send(key, "accepted", receipt["id"])
                     self.loop_guard.outgoing(
-                        thread, key, part if isinstance(part, str) else "[media]"
+                        thread,
+                        key,
+                        part if isinstance(part, str) else "",
+                        trigger=message_id,
                     )
                     if message_id:
                         self.state.mark_message(message_id, "replied")
