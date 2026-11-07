@@ -278,6 +278,22 @@ sudo chmod 600 /opt/agent-wechat-native/api-token
 sudo chmod 644 /opt/agent-wechat-native/server.toml
 ```
 
+同时准备独立的管理 Token 文件。先创建空文件，待步骤 3 中 Native 启动并创建账号后再签发凭据。
+文件必须在启动 Compose 前存在，下面的命令会保留已有内容：
+
+```bash
+sudo sh -ec '
+  umask 077
+  path=/opt/agent-wechat-native/admin-token
+  if [ ! -e "$path" ]; then
+    : > "$path"
+  fi
+  test -f "$path"
+  chown 10001:10001 "$path"
+  chmod 600 "$path"
+'
+```
+
 ### 2. 创建 compose.yaml
 
 ```yaml
@@ -294,6 +310,7 @@ services:
     volumes:
       - astrbot_data:/AstrBot/data
       - /opt/agent-wechat-native/api-token:/run/secrets/wechat-api-token:ro
+      - /opt/agent-wechat-native/admin-token:/run/secrets/wechat-admin-token:ro
 
     logging:
       driver: json-file
@@ -368,6 +385,77 @@ docker compose exec agent-wechat wx --server-name local accounts list
 [Native 登录说明](https://github.com/thisnick/agent-wechat/blob/v1.3.3/docs/src/content/docs/setup/connect.mdx)
 挂载资料目录；使用期间保持官方客户端关闭。
 
+#### 签发并保存管理 Token
+
+在宿主机安装 Python 3，用于读取 Native CLI 返回的 JSON。将下方 `ACCOUNT_ID` 替换为刚才查询到的
+Native 账号 `id`，在 `compose.yaml` 所在目录执行。管理 Token 由 Native 签发并登记，
+不能用 `openssl rand` 生成任意字符串来代替。
+
+```bash
+ACCOUNT_ID='替换为实际的Native账号ID'
+
+if sudo test -s /opt/agent-wechat-native/admin-token; then
+  echo 'admin-token 已存在，保留原凭据'
+else
+  set -o pipefail
+  docker compose exec -T agent-wechat wx --server-name local --json \
+    tokens create astrbot-group-admin --accounts "$ACCOUNT_ID" --scopes admin \
+    | sudo python3 -c '
+import json
+import sys
+from pathlib import Path
+
+token = json.load(sys.stdin).get("token")
+if not isinstance(token, str) or not 32 <= len(token) <= 1024:
+    raise SystemExit("Native 未返回有效 Token，文件未写入")
+if any(ord(c) < 33 or ord(c) > 126 for c in token):
+    raise SystemExit("Token 含非法字符，文件未写入")
+path = Path("/opt/agent-wechat-native/admin-token")
+if path.stat().st_size:
+    raise SystemExit("admin-token 已有内容，未覆盖")
+with path.open("w", encoding="ascii") as output:
+    output.write(token + "\n")
+'
+fi
+
+sudo chown 10001:10001 /opt/agent-wechat-native/admin-token
+sudo chmod 600 /opt/agent-wechat-native/admin-token
+```
+
+脚本只把返回 JSON 的 `token` 字段写入文件，不在终端显示凭据。已有非空文件不会自动重新签发。
+查询已登记的 Token 及其账号范围、scopes，可执行：
+
+```bash
+docker compose exec agent-wechat wx --server-name local tokens list
+```
+
+各项功能需要的 scopes 如下，依据 [Native v1.5.1 Token 文档](https://github.com/thisnick/agent-wechat/blob/v1.5.1/docs/src/content/docs/reference/tokens.mdx)：
+
+| 凭据或功能 | 所需 scopes |
+|---|---|
+| 日常机器人：历史、群资料、成员、SSE | `read` |
+| 日常机器人：文本、图片、语音发送及撤回自身消息 | `send`；撤回目标读取还需要 `read` |
+| 日常机器人：图片、语音、PDF 等附件读取 | `media`，并保留 `read` |
+| 独立管理 Token：机器人自身群昵称、群改名 | `admin`，限制到当前 Native 账号 |
+| 运维 CLI：登录、连接、断开账号 | `login`；本例 CLI 使用已有 owner 凭据 |
+| 标记已读 | `read-state`，本插件的新工具不需要 |
+| Native 通话 | `calls`，本插件不需要 |
+
+为日常机器人另行签发受限 Token 时，使用 `--scopes read --scopes send --scopes media`。
+本部署最初生成的 `api-token` 是 `server.toml` 配置的 owner 凭据，已覆盖这些权限；不要覆盖它来改 scope。
+上面的 `admin-token` 是独立签发的凭据。[Native v1.5.1 的 scope 检查](https://github.com/thisnick/agent-wechat/blob/v1.5.1/packages/native-client-rust/crates/wechat-api/src/lib.rs#L89-L97)允许 `admin` 通过其他 scope 的检查，
+所以管理 Token 不必再叠加 `read`、`send` 或 `media`。插件仍将日常与群管理请求交给各自客户端。
+
+如果是在已有部署中补充管理文件和挂载，执行以下命令应用 Compose 修改，并确认 AstrBot 可读到非空文件。
+检查命令只读取文件大小，不显示 Token：
+
+```bash
+docker compose config --quiet
+docker compose up -d --force-recreate astrbot
+docker compose exec -T astrbot python -c \
+  'from pathlib import Path; assert Path("/run/secrets/wechat-admin-token").stat().st_size > 0; print("管理 Token 文件已挂载")'
+```
+
 ### 4. 配置 AstrBot 机器人
 
 打开 `http://宿主机IP:6185`，按启动日志中的初始凭据登录并修改密码。
@@ -376,9 +464,17 @@ docker compose exec agent-wechat wx --server-name local accounts list
 - `server_url`：`http://127.0.0.1:6174`
 - `account_id`：上一步返回的实际账号 ID
 - `token_file`：`/run/secrets/wechat-api-token`
+- `admin_token_file`：`/run/secrets/wechat-admin-token`
 - `token`：留空
 
-宿主机文件是 `/opt/agent-wechat-native/api-token`，**机器人必须填挂载后的容器内路径**。
+需要使用新工具时，继续填写：
+
+- `enable_history_tools`：`true`，启用当前聊天历史和群资料读取。
+- `enable_wechat_actions`：`true`，启用群昵称、群改名和自身消息撤回。
+- `wechat_action_admins`：管理员真实 `senderId` 列表，例如 `["wxid_admin"]`。群改名和撤回只允许这些账号；空列表不授权任何人。
+
+`api-token` 和 `admin-token` 的宿主机目录都是 `/opt/agent-wechat-native/`，**机器人必须填上面列出的容器内路径**。
+这两个路径是本 Docker 示例的配置值；插件中的 `admin_token_file` 原始默认值仍为空，非 Docker 部署按实际路径填写。
 确认 AstrBot 版本符合插件要求，配置好模型并启用机器人。管理面板 6185 仅向管理网络开放，Native 6174 保持本机访问。
 
 ### 5. 检查连接
@@ -467,6 +563,7 @@ Loop Breaker 默认开启。每个账号、每个聊天独立统计：60 秒内�
 | `admin_token_file` | `""` | 可选独立管理凭据文件；群昵称和群改名使用此凭据 |
 
 群昵称/群改名需要单独配置 `admin_token_file`，且 Native Token 具有目标账号的 `admin` scope。
+按上面的 Docker 示例填写 `/run/secrets/wechat-admin-token`，文件创建、签发及挂载见[管理 Token 步骤](#签发并保存管理-token)。
 未配置时这两项返回“权限配置尚未准备好”，不会把原有 read/send Token 升级或用于群管理。
 撤回使用原有 read/send 凭据，读工具关闭不影响已授权撤回所需的内部目标读取。
 只在写功能开启时初始化管理客户端；凭据文件必须挂载到 AstrBot 容器内，勿将 Token 写入版本库。
