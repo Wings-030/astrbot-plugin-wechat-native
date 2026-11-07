@@ -3,7 +3,7 @@ import json
 import pytest
 from aiohttp import web
 from conftest import module
-from test_adapter import make_adapter, native_event
+from test_adapter import make_adapter, message, native_event
 
 
 async def tool_event(serve, tmp_path, **options):
@@ -129,5 +129,44 @@ async def test_search_encodes_chinese_and_only_queries_current_thread(serve, tmp
             data = json.loads(await plugin.wechat_search_messages(event, query))
             assert data["status"] == "invalid_request"
         assert len(requests) == 1
+    finally:
+        await adapter.terminate()
+
+
+async def test_group_info_preserves_unknowns_and_rejects_private(serve, tmp_path):
+    adapter, event, _ = await tool_event(
+        serve,
+        tmp_path,
+        enable_history_tools=True,
+        group_reply_mode="all",
+        msg=message(threadId="room@chatroom"),
+    )
+
+    async def handler(req):
+        assert req.path.endswith("/groups/room@chatroom")
+        return web.json_response(
+            {
+                "id": "room@chatroom",
+                "roomId": "room@chatroom",
+                "displayName": "开发群",
+                "ownerId": None,
+                "announcement": "x" * 900,
+            }
+        )
+
+    adapter.client.api_url = await serve(handler)
+    try:
+        plugin = object.__new__(module("main").WeChatNativePlugin)
+        data = json.loads(await plugin.wechat_get_group_info(event))
+        assert data["ok"]
+        assert data["group"]["ownerId"] is None
+        assert len(data["group"]["announcement"]) == 800
+        assert data["truncated"]
+    finally:
+        await adapter.terminate()
+    adapter, event, _ = await tool_event(serve, tmp_path, enable_history_tools=True)
+    try:
+        data = json.loads(await plugin.wechat_get_group_info(event))
+        assert data["status"] == "not_in_group_chat"
     finally:
         await adapter.terminate()

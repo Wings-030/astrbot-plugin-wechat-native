@@ -12,6 +12,42 @@ class HistoryTools:
         self.adapter = adapter
         self.cursors = OrderedDict()
 
+    async def group_info(self, ctx):
+        data = await self.adapter.client.group(ctx.thread)
+        if data.get("roomId") != ctx.thread or data.get("accountId", ctx.account) != ctx.account:
+            raise ToolError("not_available")
+        fields = (
+            "displayName",
+            "name",
+            "ownerId",
+            "myDisplayName",
+            "announcement",
+            "canMentionAll",
+            "isInGroup",
+        )
+        safe = {}
+        truncated = False
+        for key in fields:
+            value = data.get(key)
+            if isinstance(value, str):
+                truncated |= len(value) > 800
+                safe[key] = value[:800]
+            else:
+                safe[key] = value if value is None or type(value) is bool else None
+        admins = data.get("administratorIds")
+        safe["administratorIds"] = None
+        if isinstance(admins, list) and all(isinstance(x, str) for x in admins):
+            safe["administratorIds"] = [x[:128] for x in admins[:50]]
+            truncated |= len(admins) > 50 or any(len(x) > 128 for x in admins)
+        return result(
+            "get_group_info",
+            "success",
+            group=safe,
+            truncated=truncated,
+            coverage="saved_metadata_may_be_stale",
+            dataOnly=True,
+        )
+
     def cursor(self, value, binding):
         if not value:
             return "", 0
@@ -101,7 +137,9 @@ class HistoryTools:
 
 async def run_read(event, action, **params):
     try:
-        ctx = context(event)
+        ctx = context(event, group=action == "get_group_info")
+        if action == "get_group_info":
+            return encode(await ctx.adapter.history.group_info(ctx))
         return encode(await ctx.adapter.history.recent(ctx, action=action, **params))
     except Exception as error:
         return encode(error_result(action, error))

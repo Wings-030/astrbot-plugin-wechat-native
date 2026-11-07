@@ -783,6 +783,9 @@ class NativeClient:
             "GET", self.prefix + "/threads/" + quote(thread, safe="") + "/messages", params=params
         )
 
+    async def group(self, thread: str):
+        return await self._request("GET", self.prefix + "/groups/" + quote(thread, safe=""))
+
     async def media_assets(self, message_id: str) -> dict:
         return await self._request(
             "GET", self.prefix + "/messages/" + quote(message_id, safe="") + "/media"
