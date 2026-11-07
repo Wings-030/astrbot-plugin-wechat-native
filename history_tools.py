@@ -15,7 +15,7 @@ class HistoryTools:
     async def group_info(self, ctx):
         data = await self.adapter.client.group(ctx.thread)
         if data.get("roomId") != ctx.thread or data.get("accountId", ctx.account) != ctx.account:
-            raise ToolError("not_available")
+            raise ToolError("not_available", "group_identity_mismatch")
         fields = (
             "displayName",
             "name",
@@ -57,11 +57,11 @@ class HistoryTools:
         native, page = self.cursor(cursor, binding)
         data = await self.adapter.client.group_members(ctx.thread, limit=limit, cursor=native)
         if not isinstance(data.get("items"), list) or len(data["items"]) > limit:
-            raise ToolError("not_available")
+            raise ToolError("not_available", "member_page_invalid")
         safe = []
         for item in data["items"]:
             if not isinstance(item, dict):
-                raise ToolError("not_available")
+                raise ToolError("not_available", "member_item_invalid")
             if item.get("deleted") is True:
                 continue
             if (
@@ -69,13 +69,13 @@ class HistoryTools:
                 or item.get("groupId", ctx.thread) != ctx.thread
                 or item.get("threadId", ctx.thread) != ctx.thread
             ):
-                raise ToolError("not_available")
+                raise ToolError("not_available", "member_scope_mismatch")
             member = {
                 key: item[key][:800] if isinstance(item.get(key), str) else None
                 for key in ("id", "username", "displayName", "roomDisplayName", "mentionName")
             }
             if not member["id"] or not member["username"]:
-                raise ToolError("not_available")
+                raise ToolError("not_available", "member_identity_missing")
             if not query or any(
                 query.casefold() in (value or "").casefold() for value in member.values()
             ):
@@ -129,7 +129,7 @@ class HistoryTools:
         )
         items = data.get("items")
         if not isinstance(items, list) or len(items) > limit:
-            raise ToolError("not_available")
+            raise ToolError("not_available", "history_page_invalid")
         safe = []
         for item in items:
             if (
@@ -137,7 +137,7 @@ class HistoryTools:
                 or not isinstance(item.get("id"), str)
                 or not 1 <= len(item["id"]) <= 512
             ):
-                raise ToolError("not_available")
+                raise ToolError("not_available", "history_item_invalid")
             if item.get("deleted") is True:
                 safe.append({"messageId": item["id"], "text": "[已删除]"})
                 continue

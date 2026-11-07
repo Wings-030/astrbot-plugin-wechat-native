@@ -6,6 +6,24 @@
 
 ## Native v1.5.1 工具操作与熔断
 
+工具返回 `not_available` 时，先查看同一时刻的插件日志。JSON 中的友好状态不会包含内部错误细节，
+插件日志会区分以下原因，且不记录查询词、聊天正文、Token 或原始响应体：
+
+| 日志字段 | 含义与检查项 |
+|---|---|
+| `reason=history_tools_disabled` / `wechat_actions_disabled` | 运行中的机器人未开启对应功能；核对是否修改了当前机器人并保存应用 |
+| `reason=event_type_mismatch` / `adapter_type_mismatch` | 事件或适配器类型校验失败；日志会给出事件类型，检查插件重载及事件转发路径 |
+| `reason=native_client_closed` / `adapter_stopped` | 运行实例未连接或已停止，检查机器人生命周期与连接状态 |
+| `reason=loop_cooldown` | 当前聊天处于循环保护冷却期 |
+| `http=... code=...` | 已请求 Native；核对安全错误码、账号授权及实际 Native 版本是否支持该接口 |
+| `reason=member_page_invalid` / `member_identity_missing` / `history_page_invalid` | Native 返回的分页或成员字段不符合预期，需要核对 Native 版本与响应契约 |
+
+机器人启动时还会打印 `history_tools`、`wechat_actions` 与 `admin_token_loaded` 三个运行时布尔值。
+这些值来自机器人实例启动时读取的参数。保存配置后，确认当前机器人的启动日志已显示新值；
+升级或重载插件后若仍有事件类型不一致，完整重启 AstrBot，使插件模块与机器人实例重新加载。
+其中 `admin_token_loaded=True` 仅表示管理凭据已读取，不能替代 Native scope 与微信实际权限校验。
+工具失败后的模型回复不能当作查询结果；必须以成功的工具返回数据核对历史或群成员。
+
 新增工具沿用同一个 SQLite 状态库。`action_intents` 保存触发消息、账号/聊天、操作类型、
 参数哈希、稳定 Key、精确目标和内部 Operation ID，不保存昵称/群名正文或 Token。
 `cooldowns` 保存按账号/聊天隔离的熔断截止时间；内存轨迹最多 1024 个聊天，

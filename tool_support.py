@@ -27,8 +27,9 @@ MESSAGES = {
 
 
 class ToolError(Exception):
-    def __init__(self, status):
+    def __init__(self, status, reason="business_state"):
         self.status = status
+        self.reason = reason
 
 
 def result(action, status, **fields):
@@ -58,7 +59,16 @@ def encode(value):
 def error_result(action, error):
     if isinstance(error, ToolError):
         status = error.status
+        logger.warning(
+            "WeChat Native 工具拒绝：action=%s status=%s reason=%s", action, status, error.reason
+        )
     elif isinstance(error, NativeAPIError):
+        logger.warning(
+            "WeChat Native 工具请求失败：action=%s http=%s code=%s",
+            action,
+            error.status,
+            error.code,
+        )
         status = (
             "invalid_cursor"
             if error.code == "invalid_cursor"
@@ -90,15 +100,28 @@ class ToolContext:
 def context(event, *, write=False, group=False):
     from .adapter import WeChatNativeAdapter
 
-    if not isinstance(event, WeChatNativeEvent) or not isinstance(
-        event.adapter, WeChatNativeAdapter
-    ):
-        raise ToolError("not_available")
+    if not isinstance(event, WeChatNativeEvent):
+        logger.warning(
+            "WeChat Native 工具事件类型：actual=%s.%s expected=%s.%s",
+            type(event).__module__,
+            type(event).__qualname__,
+            WeChatNativeEvent.__module__,
+            WeChatNativeEvent.__qualname__,
+        )
+        raise ToolError("not_available", "event_type_mismatch")
+    if not isinstance(event.adapter, WeChatNativeAdapter):
+        raise ToolError("not_available", "adapter_type_mismatch")
     adapter, raw = event.adapter, event.message_obj.raw_message
     cfg = adapter.native_config
     enabled = cfg.enable_wechat_actions if write else cfg.enable_history_tools
-    if adapter.stopped or adapter._state_closed or adapter.client.closed or not enabled:
-        raise ToolError("not_available")
+    if adapter.stopped or adapter._state_closed:
+        raise ToolError("not_available", "adapter_stopped")
+    if adapter.client.closed:
+        raise ToolError("not_available", "native_client_closed")
+    if not enabled:
+        raise ToolError(
+            "not_available", "wechat_actions_disabled" if write else "history_tools_disabled"
+        )
     if not isinstance(raw, dict) or any(
         not isinstance(raw.get(k), str) or not raw[k]
         for k in ("id", "accountId", "threadId", "senderId")
@@ -125,7 +148,7 @@ def context(event, *, write=False, group=False):
     if not valid or raw.get("recall") is not None or event.is_stopped():
         raise ToolError("permission_denied")
     if adapter.loop_guard.blocked(thread):
-        raise ToolError("not_available")
+        raise ToolError("not_available", "loop_cooldown")
     is_group = thread.endswith("@chatroom")
     if group and not is_group:
         raise ToolError("not_in_group_chat")
@@ -152,7 +175,7 @@ def identity(item, ctx):
         or item.get("accountId") != ctx.account
         or item.get("threadId") != ctx.thread
     ):
-        raise ToolError("not_available")
+        raise ToolError("not_available", "message_scope_mismatch")
 
 
 def page_args(limit, cursor):

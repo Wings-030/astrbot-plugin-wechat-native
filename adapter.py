@@ -115,6 +115,13 @@ class WeChatNativeAdapter(Platform):
         self._terminate_lock = asyncio.Lock()
         self._last_time_warning = float("-inf")
         self.summary_cache = GroupSummaryCache(cfg.summary_max_messages, cfg.summary_window_minutes)
+        logger.info(
+            "WeChat Native 运行时工具开关："
+            "history_tools=%s wechat_actions=%s admin_token_loaded=%s",
+            cfg.enable_history_tools,
+            cfg.enable_wechat_actions,
+            self.admin_client is not None,
+        )
 
     def meta(self) -> PlatformMetadata:
         return PlatformMetadata(
