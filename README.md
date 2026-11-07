@@ -30,7 +30,7 @@
 | `server_url` | AstrBot 能访问的 Native 地址，可带 `/v1` | `http://127.0.0.1:6174` |
 | `account_id` | Native 的账号 `id`，从 `wx accounts list` 获取；不是微信号 | 替换为实际 ID |
 | `token_file` | Token 文件的**容器内路径**，优先于 `token` | `/run/secrets/wechat-api-token` |
-| `token` | 不用文件时填写 Native API Token，会保存在 AstrBot 配置里 | 使用文件时留空 |
+| `token` | 不用文件时先清空 `token_file`，再填写 Native API Token，会保存在 AstrBot 配置里 | 使用文件时留空 |
 
 Native Token 需要目标账号的 **read + send + media** 权限。本文 Compose 让两个容器读取同一份 Token 文件。
 模型 API Key 在 AstrBot 的模型设置中配置；更换 Token 文件后重启机器人。
@@ -474,7 +474,7 @@ docker compose exec -T astrbot python -c \
 - `wechat_action_admins`：管理员真实 `senderId` 列表，例如 `["wxid_admin"]`。群改名和撤回只允许这些账号；空列表不授权任何人。
 
 `api-token` 和 `admin-token` 的宿主机目录都是 `/opt/agent-wechat-native/`，**机器人必须填上面列出的容器内路径**。
-这两个路径是本 Docker 示例的配置值；插件中的 `admin_token_file` 原始默认值仍为空，非 Docker 部署按实际路径填写。
+这两个路径也是新建机器人表单的默认值；已有配置不会自动覆盖，非 Docker 部署按实际路径填写。
 确认 AstrBot 版本符合插件要求，配置好模型并启用机器人。管理面板 6185 仅向管理网络开放，Native 6174 保持本机访问。
 
 ### 5. 检查连接
@@ -560,7 +560,7 @@ Loop Breaker 默认开启。每个账号、每个聊天独立统计：60 秒内�
 | `enable_history_tools` | `false` | 开启历史搜索、最近消息、群资料及成员查询 |
 | `enable_wechat_actions` | `false` | 开启自身群昵称、群改名及自身消息撤回 |
 | `wechat_action_admins` | `[]` | 可改群名/撤回消息的真实 `senderId`；空列表不授权任何人 |
-| `admin_token_file` | `""` | 可选独立管理凭据文件；群昵称和群改名使用此凭据 |
+| `admin_token_file` | `/run/secrets/wechat-admin-token` | 独立管理凭据文件；群昵称和群改名使用此凭据 |
 
 群昵称/群改名需要单独配置 `admin_token_file`，且 Native Token 具有目标账号的 `admin` scope。
 按上面的 Docker 示例填写 `/run/secrets/wechat-admin-token`，文件创建、签发及挂载见[管理 Token 步骤](#签发并保存管理-token)。

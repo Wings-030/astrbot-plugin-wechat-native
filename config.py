@@ -32,7 +32,7 @@ DEFAULT_CONFIG = {
     "server_url": "",
     "account_id": "",
     "token": "",
-    "token_file": "",
+    "token_file": "/run/secrets/wechat-api-token",
     "enable_private_reply": True,
     "enable_media": True,
     "allowed_users": [],
@@ -44,16 +44,47 @@ DEFAULT_CONFIG = {
     "enable_history_tools": False,
     "enable_wechat_actions": False,
     "wechat_action_admins": [],
-    "admin_token_file": "",
+    "admin_token_file": "/run/secrets/wechat-admin-token",
     "summary_max_messages": 200,
     "summary_window_minutes": 60,
 }
 
 CONFIG_METADATA = {
-    "enable_wechat_actions": {"type": "bool", "description": "启用微信修改与撤回工具"},
-    "wechat_action_admins": {"type": "list", "description": "群改名与撤回管理员 senderId 白名单"},
-    "admin_token_file": {"type": "string", "description": "群管理专用 admin Token 文件路径"},
-    "enable_history_tools": {"type": "bool", "description": "启用当前聊天历史与群资料工具"},
+    "enable_wechat_actions": {
+        "type": "bool",
+        "description": "启用微信修改与撤回工具",
+        "hint": (
+            "允许 AI 按授权请求修改自己的群昵称、群名或撤回自己发送的消息，无需二次确认；"
+            "群改名和撤回仅限管理员白名单，修改群昵称和群名还需配置管理 Token。"
+        ),
+    },
+    "wechat_action_admins": {
+        "type": "list",
+        "description": "群改名与撤回管理员 senderId 白名单",
+        "hint": (
+            "填写管理员真实 senderId，例如 wxid_admin，不是昵称或 Native Account ID；"
+            "空列表不允许任何人改群名或撤回消息。修改机器人自己的群昵称不受此管理员名单限制，"
+            "但仍须符合群聊交互规则。"
+        ),
+    },
+    "admin_token_file": {
+        "type": "string",
+        "description": "群管理专用 admin Token 文件路径",
+        "hint": (
+            "默认 /run/secrets/wechat-admin-token；"
+            "将宿主机 admin-token 文件只读挂载到此容器内路径，"
+            "文件内容须为 Native 签发、具有目标账号 admin 权限的独立 Token。"
+            "仅开启微信修改与撤回工具后读取，此处填写文件路径而非 Token 文本。"
+        ),
+    },
+    "enable_history_tools": {
+        "type": "bool",
+        "description": "启用当前聊天历史与群资料工具",
+        "hint": (
+            "允许 AI 搜索和读取当前私聊或群聊中 Native 已保存的本地消息，并查询当前群资料与成员；"
+            "不跨聊天查询，本地历史可能不完整。群资料和成员查询仅限群聊。"
+        ),
+    },
     "logo_token": {"type": "string", "invisible": True},
     "server_url": {
         "type": "string",
@@ -74,7 +105,10 @@ CONFIG_METADATA = {
     "token_file": {
         "type": "string",
         "description": "Token 只读文件路径（优先）",
-        "hint": "AstrBot 容器内可读路径；不要填写 Native 宿主机上未挂载的路径",
+        "hint": (
+            "默认 /run/secrets/wechat-api-token，优先于 token；须为 AstrBot 容器内可读文件路径。"
+            "不用文件时先清空此项，再填写 token；不要填写未挂载的宿主机路径。"
+        ),
     },
     "enable_private_reply": {"type": "bool", "description": "启用私聊回复"},
     "enable_media": {
