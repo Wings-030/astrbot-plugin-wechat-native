@@ -815,6 +815,14 @@ class NativeClient:
             "GET", self.prefix + "/operations/" + quote(operation_id, safe="")
         )
 
+    async def recall_message(self, message_id: str, server_id: str, key: str):
+        return await self._request(
+            "POST",
+            self.prefix + "/messages/" + quote(message_id, safe="") + "/recall",
+            json={"serverId": server_id},
+            headers={"Idempotency-Key": key},
+        )
+
     async def group_mutation_by_key(self, key: str):
         return await self._request(
             "GET", self.prefix + "/group-mutations/by-idempotency-key", params={"key": key}

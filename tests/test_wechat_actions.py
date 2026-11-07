@@ -207,3 +207,124 @@ async def test_rename_checks_sender_scope_and_remote_permission(
         assert requests == ([("PATCH", {"name": "快乐摸鱼总部"})] if admins else [])
     finally:
         await adapter.terminate()
+
+
+@pytest.mark.parametrize(
+    "updates,expected",
+    [
+        ({}, "success"),
+        ({"direction": "incoming"}, "not_recallable"),
+        ({"threadId": "other"}, "permission_denied"),
+        ({"accountId": "other"}, "permission_denied"),
+        ({"senderId": "other"}, "not_recallable"),
+        ({"serverId": None}, "not_recallable"),
+        ({"serverId": 123}, "not_recallable"),
+        ({"recall": {}}, "already_recalled"),
+    ],
+)
+async def test_recall_only_current_chat_own_exact_message(serve, tmp_path, updates, expected):
+    adapter, event, _ = await action_event(serve, tmp_path, wechat_action_admins=["user"])
+    target = message(
+        id="own1",
+        threadId="room@chatroom",
+        senderId="bot",
+        direction="outgoing",
+        serverId="18446744073709551615",
+    )
+    target.update(updates)
+    requests = []
+
+    async def handler(req):
+        requests.append((req.method, req.path))
+        if req.method == "GET":
+            return web.json_response(target)
+        assert await req.json() == {"serverId": "18446744073709551615"}
+        return web.json_response(
+            {
+                "id": "recall1",
+                "accountId": "a",
+                "kind": "message_recall",
+                "state": "succeeded",
+                "result": {
+                    "messageId": "own1",
+                    "threadId": "room@chatroom",
+                    "serverId": "18446744073709551615",
+                    "status": "recalled",
+                    "remoteOutcome": "confirmed",
+                    "profileProjection": "complete",
+                },
+            }
+        )
+
+    adapter.client.api_url = await serve(handler)
+    try:
+        plugin = object.__new__(module("main").WeChatNativePlugin)
+        data = json.loads(await plugin.wechat_recall_own_message(event, "own1"))
+        assert data["status"] == expected
+        assert sum(method == "POST" for method, _ in requests) == (
+            1 if expected == "success" else 0
+        )
+        if expected == "success":
+            assert json.loads(await plugin.wechat_recall_own_message(event, "own1"))["ok"]
+            assert sum(method == "POST" for method, _ in requests) == 1
+    finally:
+        await adapter.terminate()
+
+
+async def test_recall_recent_ambiguity_does_not_submit(serve, tmp_path):
+    adapter, event, _ = await action_event(serve, tmp_path, wechat_action_admins=["user"])
+    requests = []
+
+    async def handler(req):
+        requests.append(req.method)
+        return web.json_response(
+            {
+                "items": [
+                    message(
+                        id="own1", threadId="room@chatroom", direction="outgoing", senderId="bot"
+                    ),
+                    message(
+                        id="own2", threadId="room@chatroom", direction="outgoing", senderId="bot"
+                    ),
+                ],
+                "nextCursor": None,
+            }
+        )
+
+    adapter.client.api_url = await serve(handler)
+    try:
+        plugin = object.__new__(module("main").WeChatNativePlugin)
+        assert (
+            json.loads(await plugin.wechat_recall_own_message(event))["status"]
+            == "ambiguous_target"
+        )
+        assert requests == ["GET"]
+    finally:
+        await adapter.terminate()
+
+
+async def test_recall_pending_lost_response_and_private_scope(serve, tmp_path):
+    adapter, event, _ = await tool_event(
+        serve,
+        tmp_path,
+        enable_wechat_actions=True,
+        wechat_action_admins=["user"],
+    )
+    posts = []
+
+    async def handler(req):
+        if req.method == "GET":
+            return web.json_response(message(id="own1", direction="outgoing", senderId="bot"))
+        posts.append(await req.json())
+        return web.json_response({}, status=503)
+
+    adapter.client.api_url = await serve(handler)
+    try:
+        plugin = object.__new__(module("main").WeChatNativePlugin)
+        for _ in range(2):
+            data = json.loads(await plugin.wechat_recall_own_message(event, "own1"))
+            assert data["status"] == "needs_review"
+        assert posts == [{"serverId": "900"}]
+        assert adapter.admin_client is None  # recall uses the read/send credential
+    finally:
+        await adapter.terminate()

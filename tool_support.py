@@ -77,6 +77,7 @@ def error_result(action, error):
 
 @dataclass(frozen=True)
 class ToolContext:
+    event: object
     adapter: object
     account: str
     thread: str
@@ -140,7 +141,7 @@ def context(event, *, write=False, group=False):
             raise ToolError("permission_denied")
     elif not cfg.enable_private_reply or (cfg.allowed_users and sender not in cfg.allowed_users):
         raise ToolError("permission_denied")
-    return ToolContext(adapter, cfg.account_id, thread, sender, raw["id"])
+    return ToolContext(event, adapter, cfg.account_id, thread, sender, raw["id"])
 
 
 def identity(item, ctx):

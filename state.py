@@ -145,6 +145,14 @@ class StateStore:
             )
         ]
 
+    def recall_target_matches(self, account, message_id, thread, server_id):
+        row = self.db.execute(
+            "SELECT thread, server_id FROM action_intents WHERE account=? "
+            "AND action='recall_own_message' AND target=? LIMIT 1",
+            (account, message_id),
+        ).fetchone()
+        return row is None or (row[0] == thread and row[1] == server_id)
+
     def set_cooldown(self, account: str, thread: str, until: float):
         with self.db:
             self.db.execute("DELETE FROM cooldowns WHERE until<=?", (until - 600,))
