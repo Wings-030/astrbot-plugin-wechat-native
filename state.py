@@ -36,6 +36,9 @@ class StateStore:
             CREATE TABLE IF NOT EXISTS checkpoint (id INTEGER PRIMARY KEY, cursor TEXT NOT NULL);
             INSERT OR IGNORE INTO checkpoint VALUES (1, '0');
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS cooldowns (
+                account TEXT NOT NULL, thread TEXT NOT NULL, until REAL NOT NULL,
+                PRIMARY KEY(account, thread));
             CREATE TABLE IF NOT EXISTS recalls (
                 thread TEXT NOT NULL, server_id TEXT NOT NULL, PRIMARY KEY(thread, server_id));
             CREATE TABLE IF NOT EXISTS messages (
@@ -63,6 +66,19 @@ class StateStore:
                 "ELSE 'needs_review' END WHERE status IN ('replied','no_reply') "
                 "AND EXISTS (SELECT 1 FROM sends WHERE sends.message_id=messages.id "
                 "AND sends.state!='accepted')"
+            )
+
+    def cooldown(self, account: str, thread: str) -> float:
+        row = self.db.execute(
+            "SELECT until FROM cooldowns WHERE account=? AND thread=?", (account, thread)
+        ).fetchone()
+        return row[0] if row else 0.0
+
+    def set_cooldown(self, account: str, thread: str, until: float):
+        with self.db:
+            self.db.execute("DELETE FROM cooldowns WHERE until<=?", (until - 600,))
+            self.db.execute(
+                "INSERT OR REPLACE INTO cooldowns VALUES (?, ?, ?)", (account, thread, until)
             )
 
     def bind_server(self, server_id: str):

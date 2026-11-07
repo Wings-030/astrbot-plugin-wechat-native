@@ -42,6 +42,7 @@ from .event import (
     serialize_chain,
     session_target,
 )
+from .loop_guard import LoopGuard
 from .native_client import (
     GroupMembersUnavailable,
     MediaError,
@@ -101,6 +102,7 @@ class WeChatNativeAdapter(Platform):
         self._recent_group_voices = OrderedDict()
         self._events = weakref.WeakValueDictionary()
         self._send_lock = asyncio.Lock()
+        self.loop_guard = LoopGuard(self.state, cfg.account_id)
         self._terminate_lock = asyncio.Lock()
         self._last_time_warning = float("-inf")
         self.summary_cache = GroupSummaryCache(cfg.summary_max_messages, cfg.summary_window_minutes)
@@ -734,6 +736,15 @@ class WeChatNativeAdapter(Platform):
             self._media_tasks.discard(task)
 
     async def process_native_event(self, event: dict):
+        # Recall delivery must remain able to invalidate a reply during media I/O.
+        if event.get("kind") == "message.recalled":
+            await self._process_native_event(event)
+            return
+        thread = event.get("data", {}).get("threadId", "")
+        async with self.loop_guard.gate(thread if isinstance(thread, str) else ""):
+            await self._process_native_event(event)
+
+    async def _process_native_event(self, event: dict):
         if self.stopped:
             return
         cursor = event["cursor"]
@@ -814,6 +825,9 @@ class WeChatNativeAdapter(Platform):
         ):
             raise ValueError("message_identity_mismatch")
         origin = data.get("origin", "unknown")
+        if self.loop_guard.blocked(thread):
+            self.state.accept(cursor, message_id, thread, raw.get("serverId"), "ignored")
+            return
         kind = self._classify(raw, origin)
         logger.debug(
             "WeChat Native 消息分类：message=%s type=%s app_type=%s direction=%s "
@@ -944,6 +958,23 @@ class WeChatNativeAdapter(Platform):
             await self.client.close()
 
     async def send_chain(self, thread: str, chain, *, source=None, event=None) -> bool:
+        if self.stopped:
+            raise RuntimeError("WeChat Native 已停止")
+        task = asyncio.current_task()
+        self._send_tasks.add(task)
+        try:
+            async with self.loop_guard.gate(thread):
+                if self.stopped:
+                    raise RuntimeError("WeChat Native 已停止")
+                if self.loop_guard.blocked(thread):
+                    if event:
+                        event.stop_event()
+                    return False
+                return await self._send_chain(thread, chain, source=source, event=event)
+        finally:
+            self._send_tasks.discard(task)
+
+    async def _send_chain(self, thread: str, chain, *, source=None, event=None) -> bool:
         if self.stopped:
             raise RuntimeError("WeChat Native 已停止")
         task = asyncio.current_task()
@@ -1103,6 +1134,8 @@ class WeChatNativeAdapter(Platform):
                     return False
 
                 async def check_current_source():
+                    if self.loop_guard.blocked(thread):
+                        raise ValueError("自动回复已静默停止")
                     # Downloads/uploads can overlap recalls; recheck before every submission.
                     if self.stopped:
                         raise RuntimeError("WeChat Native 已停止")
@@ -1160,6 +1193,10 @@ class WeChatNativeAdapter(Platform):
                             raise ValueError("Native 引用来源已失效，未提交发送")
 
                 for index, part in enumerate(parts):
+                    if self.loop_guard.blocked(thread):
+                        if message_id and self.state.message_status(message_id) == "replied":
+                            self.state.mark_message(message_id, "partial")
+                        return bool(index)
                     # Resolve each image with bounded memory, before recording an intent.
                     # No later component is attempted after a failure or unknown outcome.
                     if not isinstance(part, str):
@@ -1175,6 +1212,8 @@ class WeChatNativeAdapter(Platform):
                     try:
                         if index or not isinstance(part, str):
                             await check_current_source()
+                        if self.loop_guard.blocked(thread):
+                            raise ValueError("自动回复已静默停止")
                         if isinstance(part, str):
                             receipt = await self.client.send_text(
                                 thread, part, key, mentions, quote=quote
@@ -1236,6 +1275,9 @@ class WeChatNativeAdapter(Platform):
                         )
                         raise
                     self.state.finish_send(key, "accepted", receipt["id"])
+                    self.loop_guard.outgoing(
+                        thread, key, part if isinstance(part, str) else "[media]"
+                    )
                     if message_id:
                         self.state.mark_message(message_id, "replied")
                     logger.info(

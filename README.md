@@ -444,3 +444,10 @@ ruff format --check .
 - [Native v1.4.0 API](https://github.com/thisnick/agent-wechat/blob/v1.3.3/docs/src/content/docs/use/api.mdx)
 
 本插件采用 [MIT 许可证](LICENSE)。仅接入有权操作的微信账号。
+
+## 自动回复循环保护
+
+Loop Breaker 默认开启。每个账号、每个聊天独立统计：60 秒内机器人自动发送的响应达到
+8 次后，该聊天静默 10 分钟；重启保留剩余冷却，结束后自动恢复。冷却期间不会发送任何
+“暂停回复”提示，也不会退出群。文本、媒体、命令和群摘要回复统一受保护。
+硬限额可能误拦正常的高频聊天，其他聊天继续工作。
