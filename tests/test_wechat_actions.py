@@ -1,6 +1,7 @@
 import asyncio
 import json
 
+import pytest
 from aiohttp import web
 from conftest import module
 from test_adapter import message, native_event
@@ -163,5 +164,46 @@ async def test_nickname_validation_rate_limit_and_identity_conflict(serve, tmp_p
             == "rate_limited"
         )
         assert requests == ["PUT"]
+    finally:
+        await adapter.terminate()
+
+
+@pytest.mark.parametrize(
+    "admins,status,code,expected",
+    [
+        ([], 200, "", "permission_denied"),
+        (["user"], 403, "permission_denied", "permission_denied"),
+        (["user"], 403, "insufficient_scope", "configuration_error"),
+        (["user"], 200, "", "success"),
+    ],
+)
+async def test_rename_checks_sender_scope_and_remote_permission(
+    serve,
+    tmp_path,
+    admins,
+    status,
+    code,
+    expected,
+):
+    adapter, event, _ = await action_event(serve, tmp_path, wechat_action_admins=admins)
+    requests = []
+
+    async def handler(req):
+        requests.append((req.method, await req.json()))
+        if status != 200:
+            return web.json_response(
+                {"error": {"code": code, "message": "secret token"}}, status=status
+            )
+        op = operation()
+        op["result"]["action"] = "rename"
+        return web.json_response(op)
+
+    adapter.admin_client.api_url = await serve(handler)
+    try:
+        plugin = object.__new__(module("main").WeChatNativePlugin)
+        data = json.loads(await plugin.wechat_rename_group(event, "快乐摸鱼总部"))
+        assert data["status"] == expected
+        assert "secret" not in json.dumps(data)
+        assert requests == ([("PATCH", {"name": "快乐摸鱼总部"})] if admins else [])
     finally:
         await adapter.terminate()

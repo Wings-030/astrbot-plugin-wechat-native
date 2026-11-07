@@ -802,6 +802,14 @@ class NativeClient:
             headers={"Idempotency-Key": key},
         )
 
+    async def rename_group(self, thread: str, name: str, key: str):
+        return await self._request(
+            "PATCH",
+            self.prefix + "/groups/" + quote(thread, safe=""),
+            json={"name": name},
+            headers={"Idempotency-Key": key},
+        )
+
     async def operation(self, operation_id: str):
         return await self._request(
             "GET", self.prefix + "/operations/" + quote(operation_id, safe="")

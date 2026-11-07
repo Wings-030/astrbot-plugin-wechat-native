@@ -51,7 +51,8 @@ class WeChatActions:
                 or len(operation["id"]) > 512
                 or (row["operation_id"] and row["operation_id"] != operation["id"])
                 or not isinstance(payload, dict)
-                or payload.get("action") != "my_name"
+                or payload.get("action")
+                != ("my_name" if row["action"] == "set_my_group_nickname" else "rename")
                 or payload.get("targetId") != row["target"]
                 or payload.get("groupId", row["thread"]) != row["thread"]
             ):
@@ -84,33 +85,41 @@ class WeChatActions:
             async with self.adapter.loop_guard.gate(row["thread"]):
                 await self.inspect(row)
 
-    async def nickname(self, ctx, nickname):
-        action = "set_my_group_nickname"
+    async def change_group(self, ctx, action, name):
+        if (
+            action == "rename_group"
+            and ctx.sender not in self.adapter.native_config.wechat_action_admins
+        ):
+            raise ToolError("permission_denied")
         store = self.adapter.state
         existing = store.action_intent(ctx.account, ctx.thread, ctx.message_id)
         if existing:
             if existing["action"] != action:
                 raise ToolError("invalid_request")
             return await self.inspect(existing)
-        if not isinstance(nickname, str):
+        if not isinstance(name, str):
             raise ToolError("invalid_request")
-        nickname = nickname.strip()
+        name = name.strip()
         if (
-            not nickname
-            or len(nickname.encode()) > 512
-            or any(unicodedata.category(c) == "Cc" for c in nickname)
+            not name
+            or len(name.encode()) > 512
+            or any(unicodedata.category(c) == "Cc" for c in name)
         ):
             raise ToolError("invalid_request")
         previous = store.recent_action(ctx.account, ctx.thread, action)
         if previous and previous["status"] in {"pending", "needs_review"}:
             return await self.inspect(previous)
-        if previous and time.time() - previous["created"] < 60:
+        if (
+            action == "set_my_group_nickname"
+            and previous
+            and time.time() - previous["created"] < 60
+        ):
             raise ToolError("rate_limited")
         client = self.adapter.admin_client
         if client is None:
             raise ToolError("configuration_error")
         await client.open()
-        param_hash = hashlib.sha256(nickname.encode()).hexdigest()
+        param_hash = hashlib.sha256(name.encode()).hexdigest()
         key = (
             "astrbot-action-"
             + hashlib.sha256(
@@ -135,7 +144,12 @@ class WeChatActions:
         if not fresh:
             return await self.inspect(row)
         try:
-            operation = await client.set_my_group_name(ctx.thread, nickname, key)
+            mutation = (
+                client.set_my_group_name
+                if action == "set_my_group_nickname"
+                else client.rename_group
+            )
+            operation = await mutation(ctx.thread, name, key)
         except NativeAPIError as error:
             if 400 <= error.status < 500 and error.status not in {408, 429}:
                 value = error_result(action, error)
@@ -154,7 +168,13 @@ async def run_action(event, action, **params):
         actions.tasks.add(task)
         async with ctx.adapter.loop_guard.gate(ctx.thread):
             ctx = context(event, write=True, group=True)
-            return encode(await actions.nickname(ctx, **params))
+            return encode(
+                await actions.change_group(
+                    ctx,
+                    action,
+                    params["nickname"] if action == "set_my_group_nickname" else params["name"],
+                )
+            )
     except Exception as error:
         return encode(error_result(action, error))
     finally:
