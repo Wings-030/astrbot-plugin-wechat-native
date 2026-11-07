@@ -217,3 +217,23 @@ async def test_group_info_in_private_chat_is_rejected(serve, tmp_path):
         assert data["status"] == "not_in_group_chat"
     finally:
         await adapter.terminate()
+
+
+async def test_native_expired_cursor_is_invalid_cursor(serve, tmp_path):
+    adapter, event, _ = await tool_event(serve, tmp_path, enable_history_tools=True)
+
+    async def handler(req):
+        if req.query.get("cursor"):
+            return web.json_response({"error": {"code": "invalid_cursor"}}, status=400)
+        return web.json_response({"items": [], "nextCursor": "native-old"})
+
+    adapter.client.api_url = await serve(handler)
+    try:
+        plugin = object.__new__(module("main").WeChatNativePlugin)
+        first = json.loads(await plugin.wechat_get_recent_messages(event))
+        data = json.loads(
+            await plugin.wechat_get_recent_messages(event, cursor=first["nextCursor"])
+        )
+        assert data["status"] == "invalid_cursor"
+    finally:
+        await adapter.terminate()

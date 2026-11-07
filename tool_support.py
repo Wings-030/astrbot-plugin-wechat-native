@@ -60,7 +60,9 @@ def error_result(action, error):
         status = error.status
     elif isinstance(error, NativeAPIError):
         status = (
-            "configuration_error"
+            "invalid_cursor"
+            if error.code == "invalid_cursor"
+            else "configuration_error"
             if error.status == 401 or error.code in {"insufficient_scope", "forbidden"}
             else "permission_denied"
             if error.status == 403

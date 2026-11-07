@@ -23,7 +23,7 @@
 环境：Windows，Python 3.12.16，AstrBot 4.29.3（开发依赖锁定官方源码提交），
 aiohttp 3.14.5，Ruff 0.15.7。新建隔离开发环境，未使用真实微信凭据。
 
-- `python -m pytest -q`：581 passed，1 条上游 audioop 弃用警告。
+- `python -m pytest -q`：591 passed，1 条上游 audioop 弃用警告（审查修复后全量复跑）。
 - `python -m ruff check .`：通过。
 - `python -m ruff format --check .`：通过，28 个 Python 文件格式一致。
 - 对全部插件 Python 模块执行 `python -m compileall -q`：通过。
@@ -57,3 +57,23 @@ HTTP 202、pending、未知回执和本地投影状态不冒充已经成功。
 每条触发消息最多提交一次写操作；重复调用会标明 replayed，返回原操作状态。
 同群有未决群管理操作时，先核查旧操作，不把旧操作的成功误报为新参数已执行。
 硬限额可能误拦正常高频聊天；冷却与指纹始终按账号/聊天隔离。
+
+## Standards
+
+独立审查未发现需要修改的规范问题。检查了全局 AGENTS.md、项目 Ruff/pytest 配置、
+开发依赖与 CI 工作流；未找到其他 CONTRIBUTING、CODING_STANDARDS 或仓库 AGENTS 文件。
+新增模块遵循现有简单 Python 模块结构；修改范围限于工具、熔断、对应测试和支持文档。
+写入流程的少量共用形状因校验/恢复语义不同，未要求额外抽象。模拟与实机验证边界说明清楚。
+
+## Spec
+
+独立审查在集成提交发现两项 P2 问题，均已先通过真实 HTTP 回归用例复现，再修复：
+
+1. Native 实际返回的 recall_identity_mismatch、recall_target_changed、recall_target_unavailable
+   被传输层清洗为 request_failed，无法满足身份变化须保留 needs_review 和不可撤回的状态要求。
+   现在仅将这三个官方已核实的错误枚举加入安全白名单；对应分支不会泄露原始响应，也不会重发。
+2. 本地绑定游标被 Native 判定过期时，原来返回 not_available。
+   现在将已知 Native invalid_cursor 映射为工具契约要求的 invalid_cursor。
+
+审查者独立复跑了修复与 Operation 身份验证用例，10 项通过，复核范围内剩余 Spec 问题为 0。
+规范轴 0 项；需求轴最初 2 项，均已修复，无遗留问题。

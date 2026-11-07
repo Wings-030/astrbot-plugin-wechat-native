@@ -1,4 +1,4 @@
-"""agent-wechat-native v1.4.0 /v1 transport; no AstrBot OpenAPI dependency."""
+"""agent-wechat-native v1.5.1 /v1 transport; no AstrBot OpenAPI dependency."""
 
 import asyncio
 import base64
@@ -56,6 +56,9 @@ _SAFE_CODES = {
     "media_expired",
     "media_integrity_failed",
     "message_recalled",
+    "recall_identity_mismatch",
+    "recall_target_changed",
+    "recall_target_unavailable",
     "unsupported_media",
     "unsupported_application_media",
     "unsupported_attachment_encryption",
