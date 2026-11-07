@@ -48,6 +48,53 @@ class HistoryTools:
             dataOnly=True,
         )
 
+    async def members(self, ctx, query, limit, cursor):
+        page_args(limit, cursor)
+        if not isinstance(query, str) or len(query.encode()) > 256:
+            raise ToolError("invalid_request")
+        query = query.strip()
+        binding = (ctx.account, ctx.thread, "list_group_members", query, limit)
+        native, page = self.cursor(cursor, binding)
+        data = await self.adapter.client.group_members(ctx.thread, limit=limit, cursor=native)
+        if not isinstance(data.get("items"), list) or len(data["items"]) > limit:
+            raise ToolError("not_available")
+        safe = []
+        for item in data["items"]:
+            if not isinstance(item, dict):
+                raise ToolError("not_available")
+            if item.get("deleted") is True:
+                continue
+            if (
+                item.get("accountId", ctx.account) != ctx.account
+                or item.get("groupId", ctx.thread) != ctx.thread
+                or item.get("threadId", ctx.thread) != ctx.thread
+            ):
+                raise ToolError("not_available")
+            member = {
+                key: item[key][:800] if isinstance(item.get(key), str) else None
+                for key in ("id", "username", "displayName", "roomDisplayName", "mentionName")
+            }
+            if not member["id"] or not member["username"]:
+                raise ToolError("not_available")
+            if not query or any(
+                query.casefold() in (value or "").casefold() for value in member.values()
+            ):
+                safe.append(member)
+        next_cursor = self.next_cursor(data.get("nextCursor"), binding, page)
+        return result(
+            "list_group_members",
+            "success",
+            items=safe,
+            count=len(safe),
+            nextCursor=next_cursor,
+            hasMore=data.get("nextCursor") is not None,
+            truncated=bool(data.get("nextCursor") and not next_cursor),
+            coverage="current_page_filter_may_be_partial"
+            if query
+            else "saved_members_may_be_partial",
+            dataOnly=True,
+        )
+
     def cursor(self, value, binding):
         if not value:
             return "", 0
@@ -137,9 +184,11 @@ class HistoryTools:
 
 async def run_read(event, action, **params):
     try:
-        ctx = context(event, group=action == "get_group_info")
+        ctx = context(event, group=action in {"get_group_info", "list_group_members"})
         if action == "get_group_info":
             return encode(await ctx.adapter.history.group_info(ctx))
+        if action == "list_group_members":
+            return encode(await ctx.adapter.history.members(ctx, **params))
         return encode(await ctx.adapter.history.recent(ctx, action=action, **params))
     except Exception as error:
         return encode(error_result(action, error))

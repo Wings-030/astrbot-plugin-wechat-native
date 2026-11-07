@@ -786,6 +786,14 @@ class NativeClient:
     async def group(self, thread: str):
         return await self._request("GET", self.prefix + "/groups/" + quote(thread, safe=""))
 
+    async def group_members(self, thread: str, *, limit: int, cursor: str = ""):
+        params = {"limit": str(limit)}
+        if cursor:
+            params["cursor"] = cursor
+        return await self._request(
+            "GET", self.prefix + "/groups/" + quote(thread, safe="") + "/members", params=params
+        )
+
     async def media_assets(self, message_id: str) -> dict:
         return await self._request(
             "GET", self.prefix + "/messages/" + quote(message_id, safe="") + "/media"
