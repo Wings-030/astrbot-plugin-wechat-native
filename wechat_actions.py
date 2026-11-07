@@ -123,7 +123,11 @@ class WeChatActions:
         if existing:
             if existing["action"] != action:
                 raise ToolError("invalid_request")
-            return await self.inspect(existing)
+            value = await self.inspect(existing)
+            value.update(
+                replayed=True, message="这条请求已有操作记录，本次未再次执行；返回原操作状态"
+            )
+            return value
         if (
             not isinstance(message_id, str)
             or len(message_id) > 512
@@ -233,7 +237,11 @@ class WeChatActions:
         if existing:
             if existing["action"] != action:
                 raise ToolError("invalid_request")
-            return await self.inspect(existing)
+            value = await self.inspect(existing)
+            value.update(
+                replayed=True, message="这条请求已有操作记录，本次未再次执行；返回原操作状态"
+            )
+            return value
         if not isinstance(name, str):
             raise ToolError("invalid_request")
         name = name.strip()
@@ -245,7 +253,11 @@ class WeChatActions:
             raise ToolError("invalid_request")
         previous = store.recent_action(ctx.account, ctx.thread, action)
         if previous and previous["status"] in {"pending", "needs_review"}:
-            return await self.inspect(previous)
+            prior = await self.inspect(previous)
+            if prior["status"] not in FINAL:
+                return result(
+                    action, prior["status"], message="此前的操作仍在核查，本次修改尚未提交"
+                )
         if (
             action == "set_my_group_nickname"
             and previous

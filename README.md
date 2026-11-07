@@ -5,7 +5,7 @@
 支持文本私聊、发送图片、微信语音收发、图片识别、PDF 解析、群聊 @回复、群聊摘要、原生引用回复、白名单、独立会话、断线重连和持久化去重。
 支持开启机器人的**文本转图片**功能；普通文件发送暂不支持。
 
-适配版本：**AstrBot >=4.29.3,<5、Native v1.4.0**；插件运行需要 **Python 3.12+**。
+适配版本：**AstrBot >=4.29.3,<5、Native v1.5.1**；插件运行需要 **Python 3.12+**。
 
 ![微信消息接入 AstrBot 的架构图](docs/wechat-native-diagram.png)
 
@@ -302,7 +302,7 @@ services:
         max-file: "3"
 
   agent-wechat:
-    image: ghcr.io/thisnick/agent-wechat-native:v1.4.0
+    image: ghcr.io/thisnick/agent-wechat-native:v1.5.1
     container_name: agent-wechat
     restart: unless-stopped
     network_mode: host
@@ -440,8 +440,8 @@ ruff format --check .
 使用 Python 3.12 虚拟环境；生产安装由 AstrBot 处理 `requirements.txt`，无需安装开发依赖。
 
 - [AstrBot Docker 部署](https://docs.astrbot.app/deploy/astrbot/docker.html)
-- [Native Docker 部署](https://github.com/thisnick/agent-wechat/tree/v1.3.3/deploy/native)
-- [Native v1.4.0 API](https://github.com/thisnick/agent-wechat/blob/v1.3.3/docs/src/content/docs/use/api.mdx)
+- [Native Docker 部署](https://github.com/thisnick/agent-wechat/tree/v1.5.1/deploy/native)
+- [Native v1.5.1 API](https://github.com/thisnick/agent-wechat/blob/v1.5.1/docs/src/content/docs/use/api.mdx)
 
 本插件采用 [MIT 许可证](LICENSE)。仅接入有权操作的微信账号。
 
@@ -451,3 +451,43 @@ Loop Breaker 默认开启。每个账号、每个聊天独立统计：60 秒内�
 8 次后，该聊天静默 10 分钟；重启保留剩余冷却，结束后自动恢复。冷却期间不会发送任何
 “暂停回复”提示，也不会退出群。文本、媒体、命令和群摘要回复统一受保护。
 硬限额可能误拦正常的高频聊天，其他聊天继续工作。
+
+出现连续 3 轮入站与已接受自动回复交替，且内容重复/高度相似，也会提前静默熔断。
+只分析有界文本指纹，不判断对方是真人还是机器人，不额外调用模型。
+
+## 当前聊天工具（Native v1.5.1）
+
+机器人可通过自然语言调用 7 个工具，所有目标均由当前可信事件确定，模型不能选择其他账号或聊天。
+
+| 配置 | 默认值 | 用途 |
+|---|---|---|
+| `enable_history_tools` | `false` | 开启历史搜索、最近消息、群资料及成员查询 |
+| `enable_wechat_actions` | `false` | 开启自身群昵称、群改名及自身消息撤回 |
+| `wechat_action_admins` | `[]` | 可改群名/撤回消息的真实 `senderId`；空列表不授权任何人 |
+| `admin_token_file` | `""` | 可选独立管理凭据文件；群昵称和群改名使用此凭据 |
+
+群昵称/群改名需要单独配置 `admin_token_file`，且 Native Token 具有目标账号的 `admin` scope。
+未配置时这两项返回“权限配置尚未准备好”，不会把原有 read/send Token 升级或用于群管理。
+撤回使用原有 read/send 凭据，读工具关闭不影响已授权撤回所需的内部目标读取。
+只在写功能开启时初始化管理客户端；凭据文件必须挂载到 AstrBot 容器内，勿将 Token 写入版本库。
+
+| 工具 | 示例和范围 |
+|---|---|
+| `wechat_get_recent_messages` | “刚才聊了什么？”：当前聊天的 Native 本地记录 |
+| `wechat_search_messages` | “找一下 Docker”：当前聊天本地子串搜索 |
+| `wechat_get_group_info` | “群主是谁？”：未知资料保留未知 |
+| `wechat_list_group_members` | “看看群里有哪些人”：单页名单，名称筛选仅作用于该页 |
+| `wechat_set_my_group_nickname` | “你以后叫摸鱼小助手”：允许交互的当前群成员可发起，每群 60 秒最多一次 |
+| `wechat_rename_group` | 管理员“把群名改成快乐摸鱼总部”：还需微信实际权限 |
+| `wechat_recall_own_message` | 管理员“撤回你刚才那条”：仅当前聊天本账号发出的消息，目标含糊会追问 |
+
+每次历史/成员读取最多一页（默认 20、最多 50），游标绑定聊天、筛选与页大小，10 分钟有效，
+最多继续 20 页；重启后需重新查询。本地历史可能不完整，未找到不代表从未讨论过；不刷新资料、
+标记已读或下载历史媒体。单条历史正文最多 800 字符，工具 JSON 最多 16 KiB，截断会标记。
+历史正文、公告、昵称和成员名称都只是不可信参考资料，不构成授权指令。
+
+已授权写操作**不二次确认**。插件在请求前把操作意图与稳定幂等 Key 写入原有 SQLite，
+同一触发消息最多提交一次修改请求。`pending` 表示处理中，`needs_review` 表示结果未知，
+二者都不能作为成功，也不能自动换 Key 重试。详见[运维说明](docs/operations.md)。
+
+当前验证使用模拟 Native HTTP 和真实 AstrBot SDK；尚未使用真实微信账号验证这些新增功能。

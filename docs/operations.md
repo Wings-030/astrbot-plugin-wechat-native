@@ -4,6 +4,36 @@
 
 本页说明消息可靠性、状态保留和回执排查。安装、配置及 Docker 部署请参阅 README。
 
+## Native v1.5.1 工具操作与熔断
+
+新增工具沿用同一个 SQLite 状态库。`action_intents` 保存触发消息、账号/聊天、操作类型、
+参数哈希、稳定 Key、精确目标和内部 Operation ID，不保存昵称/群名正文或 Token。
+`cooldowns` 保存按账号/聊天隔离的熔断截止时间；内存轨迹最多 1024 个聊天，
+每个聊天最多 64 条指纹事件和 8 条近期响应计数，锁数量固定有界。
+
+操作受理（HTTP 202）不代表完成。插件核验 Operation 的账号、kind、目标、最终 state 与
+remoteOutcome/profileProjection 后才解释结果；Native 服务端接受不代表对方设备已同步。
+组管理结果的本地 profileProjection 可以仍在追赶远端，工具不会冒充读取到了刷新后的资料。
+普通权限不足返回业务状态，不终止 Adapter；用户只看到友好说明，内部标识和凭据不进入工具结果。
+
+群管理若丢失首次响应，用原 Key 查询 group-mutations；有 Operation ID 时只读取对应操作。
+撤回使用原始字符串 serverId（支持完整 uint64 范围）；v1.5.1 没有撤回的按 Key 查询接口，
+若首次响应丢失且没有 Operation ID，只能保留 needs_review 等待人工核查，不猜测接口或重发 POST。
+启动后对最多 100 条待定意图执行只读恢复；仍不确定的记录继续保留。后续同群同类请求遇到未决的
+群管理操作，会先查询原操作。人工核查请结合原 Key/Operation ID 和 Native 账号对应操作记录，
+不要通过清空状态库来“重试”。
+
+修改机器人群昵称与修改整个群名授权不同：前者允许当前已启用群成员，后者与撤回仅允许
+wechat_action_admins 中的真实 senderId。群回复 all/probability 模式不会扩大管理员白名单。
+群管理使用专用 admin_token_file，原有凭据保持 read/send 最小权限。空管理员列表不代表允许所有人。
+
+熔断对当前聊天静默 10 分钟，重启保留剩余时间；入站仍消费游标，但不交给模型，
+发送前还会复查。撤回通知继续处理，不能被媒体发送门控挡住。
+60 秒 8 次自动响应的硬限额可能误拦正常高频聊天。没有 AI 关闭熔断、退出群或全账号停机操作。
+
+发布前运行 pytest -q、ruff check . 和现有格式检查。模拟通过不等于微信实机验证通过；
+真实改名/撤回只能另行在明确授权的测试群和测试消息中验证，不自动部署生产账号。
+
 ## 消息可靠性及状态
 
 插件自动在 AstrBot 的 `data/plugin_data/astrbot_plugin_wechat_native/` 下创建 SQLite 状态库，

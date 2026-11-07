@@ -1224,6 +1224,12 @@ class WeChatNativeAdapter(Platform):
                         data, content_type = await loader(part)
                     key = "astrbot-" + uuid.uuid4().hex
                     self.state.begin_send(key, message_id, thread)
+
+                    def record_voice_progress(chunks):
+                        self.state.record_voice_chunks(key, chunks)
+                        if any(chunk.get("state") == "accepted" for chunk in chunks):
+                            self.loop_guard.outgoing(thread, key, "", trigger=message_id)
+
                     logger.debug(
                         "WeChat Native 开始发送回复：message=%s receipt_key=%s", message_id, key
                     )
@@ -1245,9 +1251,7 @@ class WeChatNativeAdapter(Platform):
                                 key,
                                 record_job=lambda job_id: self.state.record_send_id(key, job_id),
                                 before_send=check_current_source,
-                                record_chunks=lambda chunks: self.state.record_voice_chunks(
-                                    key, chunks
-                                ),
+                                record_chunks=record_voice_progress,
                             )
                         else:
                             receipt = await self.client.send_image(

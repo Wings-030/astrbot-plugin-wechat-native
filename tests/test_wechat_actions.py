@@ -174,6 +174,7 @@ async def test_nickname_validation_rate_limit_and_identity_conflict(serve, tmp_p
         ([], 200, "", "permission_denied"),
         (["user"], 403, "permission_denied", "permission_denied"),
         (["user"], 403, "insufficient_scope", "configuration_error"),
+        (["user"], 403, "forbidden", "configuration_error"),
         (["user"], 200, "", "success"),
     ],
 )

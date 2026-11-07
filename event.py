@@ -212,11 +212,18 @@ class WeChatNativeEvent(AstrMessageEvent):
         if self.adapter.stopped:
             raise RuntimeError("WeChat Native 已停止")
         raw = (
-            self.message_obj.raw_message
-            if isinstance(self.message_obj.raw_message, dict)
-            else None
+            self.message_obj.raw_message if isinstance(self.message_obj.raw_message, dict) else None
         )
         status = self.adapter.state.message_status(self.message_obj.message_id)
+        if (
+            raw
+            and isinstance(raw.get("threadId"), str)
+            and self.adapter.loop_guard.blocked(raw["threadId"])
+        ):
+            self.stop_event()
+            if status == "queued":
+                self.adapter.state.mark_message(self.message_obj.message_id, "no_reply")
+            return
         if status == "recalled":
             self.stop_event()
             return

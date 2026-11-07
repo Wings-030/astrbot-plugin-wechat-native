@@ -1,8 +1,9 @@
 import asyncio
 from pathlib import Path
 
+import pytest
 from astrbot.api.event import MessageChain
-from astrbot.api.message_components import Plain
+from astrbot.api.message_components import Image, Plain, Record
 from conftest import module
 from test_adapter import (
     make_adapter,
@@ -118,5 +119,34 @@ async def test_adapter_associates_repeated_replies_with_real_incoming(serve, tmp
         await adapter.process_native_event(native_event(msg, "4"))
         assert queue.empty()
         assert adapter.state.cursor == "4"
+    finally:
+        await adapter.terminate()
+
+
+@pytest.mark.parametrize(
+    "component",
+    [Plain("summary or command"), Image.fromBytes(b"image"), Record(file="missing.wav")],
+)
+async def test_all_outbound_component_types_are_silent_during_cooldown(serve, tmp_path, component):
+    adapter, _, _, sent = await make_adapter(serve, tmp_path)
+    try:
+        adapter.loop_guard.trip("peer", "test")
+        assert not await adapter.send_chain("peer", MessageChain([component]))
+        assert sent == []
+    finally:
+        await adapter.terminate()
+
+
+async def test_muted_event_does_not_overwrite_an_existing_failure(serve, tmp_path):
+    adapter, queue, msg, sent = await make_adapter(serve, tmp_path)
+    try:
+        await adapter.process_native_event(native_event(msg))
+        event = queue.get_nowait()
+        adapter.state.mark_message(msg["id"], "needs_review")
+        adapter.loop_guard.trip("peer", "test")
+        await event.send(MessageChain([Plain("late reply")]))
+        assert event.is_stopped()
+        assert adapter.state.message_status(msg["id"]) == "needs_review"
+        assert not sent
     finally:
         await adapter.terminate()

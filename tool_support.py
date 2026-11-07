@@ -61,7 +61,7 @@ def error_result(action, error):
     elif isinstance(error, NativeAPIError):
         status = (
             "configuration_error"
-            if error.status == 401 or error.code == "insufficient_scope"
+            if error.status == 401 or error.code in {"insufficient_scope", "forbidden"}
             else "permission_denied"
             if error.status == 403
             else "rate_limited"

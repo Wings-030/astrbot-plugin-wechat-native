@@ -207,8 +207,12 @@ async def test_member_filter_is_local_to_one_native_page(serve, tmp_path):
         assert requests[-1] == {"limit": "20", "cursor": "members-next"}
     finally:
         await adapter.terminate()
+
+
+async def test_group_info_in_private_chat_is_rejected(serve, tmp_path):
     adapter, event, _ = await tool_event(serve, tmp_path, enable_history_tools=True)
     try:
+        plugin = object.__new__(module("main").WeChatNativePlugin)
         data = json.loads(await plugin.wechat_get_group_info(event))
         assert data["status"] == "not_in_group_chat"
     finally:
