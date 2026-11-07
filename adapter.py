@@ -42,6 +42,7 @@ from .event import (
     serialize_chain,
     session_target,
 )
+from .history_tools import HistoryTools
 from .loop_guard import LoopGuard
 from .native_client import (
     GroupMembersUnavailable,
@@ -103,6 +104,7 @@ class WeChatNativeAdapter(Platform):
         self._events = weakref.WeakValueDictionary()
         self._send_lock = asyncio.Lock()
         self.loop_guard = LoopGuard(self.state, cfg.account_id)
+        self.history = HistoryTools(self)
         self._terminate_lock = asyncio.Lock()
         self._last_time_warning = float("-inf")
         self.summary_cache = GroupSummaryCache(cfg.summary_max_messages, cfg.summary_window_minutes)

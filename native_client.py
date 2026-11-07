@@ -423,11 +423,11 @@ def _normalize_streaming_wav(data: bytes) -> bytes:
     out[4:8] = (total - 8).to_bytes(4, "little")
     index = 12
     while index + 8 <= total:
-        chunk_id = bytes(out[index:index + 4])
-        chunk_size = int.from_bytes(out[index + 4:index + 8], "little")
+        chunk_id = bytes(out[index : index + 4])
+        chunk_size = int.from_bytes(out[index + 4 : index + 8], "little")
         available = total - index - 8
         if chunk_id == b"data":
-            out[index + 4:index + 8] = available.to_bytes(4, "little")
+            out[index + 4 : index + 8] = available.to_bytes(4, "little")
             break
         if chunk_size > available:
             break
@@ -772,6 +772,16 @@ class NativeClient:
 
     async def message(self, message_id: str):
         return await self._request("GET", self.prefix + "/messages/" + quote(message_id, safe=""))
+
+    async def messages(self, thread: str, *, limit: int, cursor: str = "", query: str = ""):
+        params = {"limit": str(limit)}
+        if cursor:
+            params["cursor"] = cursor
+        if query:
+            params["query"] = query
+        return await self._request(
+            "GET", self.prefix + "/threads/" + quote(thread, safe="") + "/messages", params=params
+        )
 
     async def media_assets(self, message_id: str) -> dict:
         return await self._request(

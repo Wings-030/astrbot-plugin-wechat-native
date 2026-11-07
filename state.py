@@ -126,6 +126,12 @@ class StateStore:
         row = self.db.execute("SELECT status FROM messages WHERE id=?", (message_id,)).fetchone()
         return row[0] if row else None
 
+    def message_matches(self, message_id: str, thread: str, server_id: str | None) -> bool:
+        row = self.db.execute(
+            "SELECT thread, server_id FROM messages WHERE id=?", (message_id,)
+        ).fetchone()
+        return bool(row and row[0] == thread and row[1] == server_id)
+
     def find_message_id(self, thread: str, server_id: str) -> str | None:
         rows = self.db.execute(
             "SELECT id FROM messages WHERE thread=? AND server_id=? LIMIT 2", (thread, server_id)

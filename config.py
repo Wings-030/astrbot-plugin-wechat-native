@@ -41,11 +41,13 @@ DEFAULT_CONFIG = {
     "allowed_groups": [],
     "unique_session": True,
     "enable_group_summary": False,
+    "enable_history_tools": False,
     "summary_max_messages": 200,
     "summary_window_minutes": 60,
 }
 
 CONFIG_METADATA = {
+    "enable_history_tools": {"type": "bool", "description": "启用当前聊天历史与群资料工具"},
     "logo_token": {"type": "string", "invisible": True},
     "server_url": {
         "type": "string",
@@ -145,6 +147,7 @@ class NativeConfig:
     allowed_groups: frozenset[str] = frozenset()
     unique_session: bool = True
     enable_group_summary: bool = False
+    enable_history_tools: bool = False
     summary_max_messages: int = 200
     summary_window_minutes: int = 60
 
@@ -179,6 +182,7 @@ class NativeConfig:
             "enable_media",
             "unique_session",
             "enable_group_summary",
+            "enable_history_tools",
         ):
             if key in data and not isinstance(data[key], bool):
                 raise ValueError(f"{key} 必须是布尔值")
@@ -206,6 +210,7 @@ class NativeConfig:
             group_reply_style=style,
             unique_session=data.get("unique_session", True),
             enable_group_summary=data.get("enable_group_summary", False),
+            enable_history_tools=data.get("enable_history_tools", False),
             summary_max_messages=data.get("summary_max_messages", 200),
             summary_window_minutes=data.get("summary_window_minutes", 60),
             **lists,
