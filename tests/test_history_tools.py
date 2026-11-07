@@ -106,3 +106,28 @@ async def test_foreign_and_tampered_events_cannot_read(serve, tmp_path):
         assert len(calls) == 1
     finally:
         await adapter.terminate()
+
+
+async def test_search_encodes_chinese_and_only_queries_current_thread(serve, tmp_path):
+    adapter, event, msg = await tool_event(serve, tmp_path, enable_history_tools=True)
+    requests = []
+
+    async def handler(req):
+        requests.append((req.path, dict(req.query)))
+        return web.json_response({"items": [], "nextCursor": None})
+
+    adapter.client.api_url = await serve(handler)
+    try:
+        plugin = object.__new__(module("main").WeChatNativePlugin)
+        data = json.loads(await plugin.wechat_search_messages(event, "  中文 Docker &  "))
+        assert data["ok"] and data["count"] == 0
+        assert data["coverage"] == "local_history_may_be_partial"
+        assert requests == [
+            ("/accounts/a/threads/peer/messages", {"limit": "20", "query": "中文 Docker &"})
+        ]
+        for query in (" ", "中" * 86, None):
+            data = json.loads(await plugin.wechat_search_messages(event, query))
+            assert data["status"] == "invalid_request"
+        assert len(requests) == 1
+    finally:
+        await adapter.terminate()

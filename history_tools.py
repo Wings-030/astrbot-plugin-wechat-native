@@ -33,11 +33,17 @@ class HistoryTools:
             self.cursors.popitem(last=False)
         return token
 
-    async def recent(self, ctx, limit, cursor):
+    async def recent(self, ctx, limit, cursor, query=None, *, action="recent_messages"):
         page_args(limit, cursor)
-        binding = (ctx.account, ctx.thread, "recent_messages", "", limit)
+        if action == "search_messages":
+            if not isinstance(query, str) or not query.strip() or len(query.strip().encode()) > 256:
+                raise ToolError("invalid_request")
+            query = query.strip()
+        binding = (ctx.account, ctx.thread, action, query or "", limit)
         native_cursor, page = self.cursor(cursor, binding)
-        data = await self.adapter.client.messages(ctx.thread, limit=limit, cursor=native_cursor)
+        data = await self.adapter.client.messages(
+            ctx.thread, limit=limit, cursor=native_cursor, query=query or ""
+        )
         items = data.get("items")
         if not isinstance(items, list) or len(items) > limit:
             raise ToolError("not_available")
@@ -78,7 +84,7 @@ class HistoryTools:
             )
         next_cursor = self.next_cursor(data.get("nextCursor"), binding, page)
         return result(
-            "recent_messages",
+            action,
             "success",
             scope="current_chat",
             source="native_local_history",
@@ -89,12 +95,13 @@ class HistoryTools:
             truncated=bool(data.get("nextCursor") and not next_cursor),
             coverage="local_history_may_be_partial",
             dataOnly=True,
+            **({"query": query} if query is not None else {}),
         )
 
 
 async def run_read(event, action, **params):
     try:
         ctx = context(event)
-        return encode(await ctx.adapter.history.recent(ctx, **params))
+        return encode(await ctx.adapter.history.recent(ctx, action=action, **params))
     except Exception as error:
         return encode(error_result(action, error))
