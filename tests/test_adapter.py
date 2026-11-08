@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -46,7 +47,10 @@ def no_telemetry(monkeypatch):
     monkeypatch.setattr(Metric, "upload", upload)
 
 
-async def make_adapter(serve, tmp_path, msg=None, *, media_data=VALID_JPEG, **options):
+async def make_adapter(
+    serve, tmp_path, msg=None, *, media_data=VALID_JPEG, group_details=None, send_status=200,
+    **options,
+):
     msg = msg or message()
     sent = []
 
@@ -70,8 +74,13 @@ async def make_adapter(serve, tmp_path, msg=None, *, media_data=VALID_JPEG, **op
             return web.json_response(msg)
         if "/members/" in req.path and req.method == "GET":
             return web.json_response(member_lookup(req.path.rsplit("/", 1)[-1]))
+        if group_details is not None and "/groups/" in req.path:
+            group = group_details.get(req.path.rsplit("/", 1)[-1])
+            return web.json_response(group or {}, status=200 if group else 404)
         if req.method == "POST":
             sent.append((req.headers["Idempotency-Key"], await req.json()))
+            if send_status != 200:
+                return web.json_response({"message": "private error details"}, status=send_status)
             return web.json_response(
                 {
                     "id": "s1",
@@ -92,6 +101,117 @@ async def make_adapter(serve, tmp_path, msg=None, *, media_data=VALID_JPEG, **op
     await adapter.client.open()
     adapter.bot_self_id = "bot"
     return adapter, queue, msg, sent
+
+
+async def test_group_red_packet_reply_rotation_nickname_cooldown_and_dedup(
+    serve, tmp_path, monkeypatch, caplog
+):
+    room, other = "room@chatroom", "other@chatroom"
+    details = {
+        room: {"accountId": "a", "roomId": room, "myDisplayName": "摸鱼小助手"},
+        other: {"accountId": "a", "roomId": other},
+    }
+    now = 100.0
+    monkeypatch.setattr(
+        module("adapter"), "time", SimpleNamespace(time=time.time, monotonic=lambda: now)
+    )
+    msg = message(threadId=room, type=49, appMessageType=2001, body=None)
+    adapter, queue, _, sent = await make_adapter(
+        serve,
+        tmp_path,
+        msg,
+        group_details=details,
+        enable_group_red_packet_reply=True,
+        group_reply_style="quote",
+    )
+    adapter.loop_guard.clock = lambda: now
+
+    async def deliver(cursor, thread=room):
+        msg.update(id=f"m{cursor}", serverId=str(900 + cursor), threadId=thread)
+        await adapter.process_native_event(native_event(msg, str(cursor)))
+
+    try:
+        await deliver(1)
+        await deliver(2)
+        assert len(sent) == 1
+        await deliver(3, other)
+        assert [payload["threadId"] for _, payload in sent] == [room, other]
+        assert sent[1][1]["text"] in {
+            "检测到财富气息，大家手速准备！💰",
+            "潜水员集合！水面上漂来一只红包啦～🫧",
+            "咚咚咚！给发红包的老板敲三下小鼓！🥁",
+        }
+        now += 30
+        await adapter.process_native_event(native_event(msg, "4"))
+        assert len(sent) == 2
+        for cursor in range(5, 12):
+            await deliver(cursor)
+            now += 30
+        room_texts = [payload["text"] for _, payload in sent if payload["threadId"] == room]
+        assert len(set(room_texts)) == 8
+        assert "感谢老板！摸鱼小助手宣布你是今天最帅的人！😎" in room_texts
+        details[room]["myDisplayName"] = "新昵称"
+        for cursor in range(12, 20):
+            await deliver(cursor)
+            now += 30
+        updated = [payload["text"] for _, payload in sent[-8:]]
+        assert len(set(updated)) == 8
+        assert "感谢老板！新昵称宣布你是今天最帅的人！😎" in updated
+        assert updated[0] != room_texts[-1]
+        assert all(set(payload) == {"threadId", "text"} for _, payload in sent)
+        assert sum("红包暖场已发送" in rec.message for rec in caplog.records) == len(sent)
+        assert queue.empty()
+    finally:
+        await adapter.terminate()
+
+
+@pytest.mark.parametrize(
+    "updates,options,origin",
+    [
+        ({}, {"enable_group_red_packet_reply": False}, "live"),
+        ({}, {"group_reply_mode": "disabled"}, "live"),
+        ({}, {"allowed_groups": ["other@chatroom"]}, "live"),
+        ({"threadId": "peer"}, {}, "live"),
+        ({"senderId": "bot"}, {}, "live"),
+        ({"direction": "outgoing"}, {}, "live"),
+        ({"recall": {}}, {}, "live"),
+        ({"appMessageType": 2000}, {}, "live"),
+        ({"type": 1, "body": "恭喜发财，红包 🧧"}, {}, "live"),
+        ({}, {}, "history_sync"),
+    ],
+)
+async def test_group_red_packet_reply_ignores_ineligible_events(
+    serve, tmp_path, updates, options, origin
+):
+    raw = {"threadId": "room@chatroom", "type": 49, "appMessageType": 2001, "body": None}
+    msg = message(**(raw | updates))
+    cfg = {"enable_group_red_packet_reply": True} | options
+    adapter, queue, _, sent = await make_adapter(serve, tmp_path, msg, **cfg)
+    try:
+        await adapter.process_native_event(native_event(msg, origin=origin))
+        assert sent == []
+        assert queue.empty()
+    finally:
+        await adapter.terminate()
+
+
+async def test_group_red_packet_reply_logs_only_a_safe_send_failure(serve, tmp_path, caplog):
+    msg = message(threadId="room@chatroom", type=49, appMessageType=2001)
+    adapter, queue, _, sent = await make_adapter(
+        serve, tmp_path, msg, group_details={}, send_status=403, enable_group_red_packet_reply=True
+    )
+    try:
+        await adapter.process_native_event(native_event(msg))
+        await adapter.process_native_event(native_event(msg, "2"))
+        assert len(sent) == 1
+        assert queue.empty()
+        assert adapter.state.message_status(msg["id"]) == "failed"
+        warnings = [rec.message for rec in caplog.records if rec.levelname == "WARNING"]
+        assert warnings == ["WeChat Native 红包暖场发送失败：request_failed"]
+        assert "private error details" not in caplog.text
+        assert "红包暖场已发送" not in caplog.text
+    finally:
+        await adapter.terminate()
 
 
 async def test_private_event_real_framework_lifecycle_and_reply(serve, tmp_path):

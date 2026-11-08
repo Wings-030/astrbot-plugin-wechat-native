@@ -8,7 +8,7 @@ import time
 import uuid
 import weakref
 from collections import OrderedDict
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from astrbot.api import logger
@@ -61,6 +61,40 @@ from .state import StateStore, cursor_number
 from .summary import GroupSummaryCache, is_summary_command
 from .wechat_actions import WeChatActions
 
+RED_PACKET_COOLDOWN = 30
+RED_PACKET_TEMPLATES = (
+    "检测到财富气息，大家手速准备！💰",
+    "感谢老板！{nickname}宣布你是今天最帅的人！😎",
+    "{nickname}的小雷达响了！是哪位好心人掉了一地好运呀？📡",
+    "潜水员集合！水面上漂来一只红包啦～🫧",
+    "{nickname}开个竞猜，今天谁是手气王？👑",
+    "咚咚咚！给发红包的老板敲三下小鼓！🥁",
+    "抢到了来报个喜，没抢到来跟{nickname}击个掌！✋",
+    "{nickname}把好运摇匀啦，来看看谁先抽到！🧧",
+)
+
+
+@dataclass
+class RedPacketReplies:
+    last_attempt: float = float("-inf")
+    last_template: str | None = None
+    remaining: list[str] = field(default_factory=list)
+
+    def next_template(self, nickname: str) -> str:
+        def available(template: str) -> bool:
+            return bool(nickname) or "{nickname}" not in template
+
+        for index, template in enumerate(self.remaining):
+            if available(template):
+                return self.remaining.pop(index)
+        self.remaining = list(RED_PACKET_TEMPLATES)
+        random.shuffle(self.remaining)
+        index = next(
+            i for i, template in enumerate(self.remaining)
+            if template != self.last_template and available(template)
+        )
+        return self.remaining.pop(index)
+
 
 @register_platform_adapter(
     ADAPTER_ID,
@@ -107,6 +141,7 @@ class WeChatNativeAdapter(Platform):
         self._recent_group_images = OrderedDict()
         self._recent_group_pdfs = OrderedDict()
         self._recent_group_voices = OrderedDict()
+        self._red_packet_replies: dict[str, RedPacketReplies] = {}
         self._events = weakref.WeakValueDictionary()
         self._send_lock = asyncio.Lock()
         self.loop_guard = LoopGuard(self.state, cfg.account_id)
@@ -175,6 +210,16 @@ class WeChatNativeAdapter(Platform):
             return ignored("missing_sender")
         cfg = self.native_config
         msg_type = raw.get("type")
+        if msg_type == 49 and raw.get("appMessageType") == 2001:
+            thread = raw["threadId"]
+            if (
+                not cfg.enable_group_red_packet_reply
+                or not thread.endswith("@chatroom")
+                or cfg.group_reply_mode == "disabled"
+                or (cfg.allowed_groups and thread not in cfg.allowed_groups)
+            ):
+                return ignored("red_packet_reply_disabled")
+            return "red_packet" if self._check_timestamp(raw) else ignored("invalid_timestamp")
         is_direct_image = msg_type == 3
         is_direct_voice = msg_type == 34
         # Native exposes a file's name only through its media asset, so a direct
@@ -751,6 +796,42 @@ class WeChatNativeAdapter(Platform):
         finally:
             self._media_tasks.discard(task)
 
+    async def _reply_to_red_packet(self, raw: dict) -> None:
+        thread, message_id = raw["threadId"], raw["id"]
+        replies = self._red_packet_replies.setdefault(thread, RedPacketReplies())
+        if time.monotonic() - replies.last_attempt < RED_PACKET_COOLDOWN:
+            self.state.mark_message(message_id, "no_reply")
+            return
+
+        nickname = ""
+        try:
+            group = await self.client.group(thread)
+            account = self.native_config.account_id
+            if group.get("roomId") == thread and group.get("accountId", account) == account:
+                value = group.get("myDisplayName")
+                if isinstance(value, str):
+                    nickname = " ".join(value.split())[:128]
+        except NativeAPIError:
+            pass
+
+        template = replies.next_template(nickname)
+        chain = MessageChain([Plain(template.format(nickname=nickname))])
+        try:
+            sent = await self._send_chain(thread, chain, source=raw, red_packet=True)
+        except (NativeAPIError, SendError, ValueError, RuntimeError) as error:
+            if self.state.message_status(message_id) == "queued":
+                self.state.mark_message(message_id, "failed")
+            reason = error.code if isinstance(error, NativeAPIError) else type(error).__name__
+            logger.warning("WeChat Native 红包暖场发送失败：%s", reason)
+        else:
+            if not sent:
+                replies.remaining.insert(0, template)
+                self.state.mark_message(message_id, "no_reply")
+                return
+            logger.info("WeChat Native 红包暖场已发送")
+        replies.last_attempt = time.monotonic()
+        replies.last_template = template
+
     async def process_native_event(self, event: dict):
         # Recall delivery must remain able to invalidate a reply during media I/O.
         if event.get("kind") == "message.recalled":
@@ -858,6 +939,10 @@ class WeChatNativeAdapter(Platform):
             self.native_config.enable_media,
             self.native_config.enable_private_reply,
         )
+        if kind == "red_packet":
+            if self.state.accept(cursor, message_id, thread, raw.get("serverId"), "queued"):
+                await self._reply_to_red_packet(raw)
+            return
         eligible = kind != "ignore"
         cacheable = self.native_config.enable_group_summary and self._eligible(
             raw, origin, summary=True
@@ -999,7 +1084,9 @@ class WeChatNativeAdapter(Platform):
         finally:
             self._send_tasks.discard(task)
 
-    async def _send_chain(self, thread: str, chain, *, source=None, event=None) -> bool:
+    async def _send_chain(
+        self, thread: str, chain, *, source=None, event=None, red_packet: bool = False
+    ) -> bool:
         if self.stopped:
             raise RuntimeError("WeChat Native 已停止")
         task = asyncio.current_task()
@@ -1019,6 +1106,7 @@ class WeChatNativeAdapter(Platform):
                 has_text = any(isinstance(part, str) for part in parts)
                 if (
                     source
+                    and not red_packet
                     and thread.endswith("@chatroom")
                     and has_text
                     and self.native_config.group_reply_style == "quote"
@@ -1048,7 +1136,8 @@ class WeChatNativeAdapter(Platform):
                             event.stop_event()
                         return False
                     if (
-                        thread.endswith("@chatroom")
+                        not red_packet
+                        and thread.endswith("@chatroom")
                         and self.native_config.group_reply_style == "mention"
                         and mentions is None
                         and has_text
@@ -1296,12 +1385,13 @@ class WeChatNativeAdapter(Platform):
                                 if state == "cancelled"
                                 else state,
                             )
-                        logger.error(
-                            "WeChat Native 回复未确认；状态 %s，回执键 %s。"
-                            "请检查状态库，勿盲目重发",
-                            state,
-                            key,
-                        )
+                        if not red_packet:
+                            logger.error(
+                                "WeChat Native 回复未确认；状态 %s，回执键 %s。"
+                                "请检查状态库，勿盲目重发",
+                                state,
+                                key,
+                            )
                         raise
                     self.state.finish_send(key, "accepted", receipt["id"])
                     self.loop_guard.outgoing(
@@ -1312,11 +1402,12 @@ class WeChatNativeAdapter(Platform):
                     )
                     if message_id:
                         self.state.mark_message(message_id, "replied")
-                    logger.info(
-                        "WeChat Native 回复已被 Native 接受：message=%s send=%s",
-                        message_id,
-                        receipt["id"],
-                    )
+                    if not red_packet:
+                        logger.info(
+                            "WeChat Native 回复已被 Native 接受：message=%s send=%s",
+                            message_id,
+                            receipt["id"],
+                        )
                 return True
         finally:
             self._send_tasks.discard(task)

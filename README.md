@@ -44,6 +44,7 @@ Native Token 需要目标账号的 **read + send + media** 权限。本文 Compo
 | `allowed_users` | `[]` | 私聊 senderId 白名单；空列表允许所有人，不限制群成员 |
 | `group_reply_mode` | `mention` | `mention`：真正 @机器人；`all`：全部群文本与直接语音都直接唤醒；`probability`：全部进入 AstrBot，但只有 @ 唤醒，其余交给 AstrBot 的主动回复概率；`disabled`：不回复群聊 |
 | `group_reply_style` | `mention` | 群聊回复方式：`mention` @触发者；`quote` 引用触发消息；`plain` 直接发送 |
+| `enable_group_red_packet_reply` | `false` | 群红包自动暖场。在允许回复的群里，无需 @，同群 30 秒内最多回复一次 |
 | `allowed_groups` | `[]` | 群 threadId 白名单，通常以 `@chatroom` 结尾；空列表允许所有群 |
 | `unique_session` | `true` | 同群不同成员独立会话；关闭后同群共享会话 |
 
