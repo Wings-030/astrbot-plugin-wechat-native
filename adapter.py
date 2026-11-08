@@ -62,6 +62,8 @@ from .summary import GroupSummaryCache, is_summary_command
 from .wechat_actions import WeChatActions
 
 RED_PACKET_COOLDOWN = 30
+# A deployed Native instance reported a confirmed group red packet as app subtype 47.
+RED_PACKET_APP_TYPES = (47, 2001)
 RED_PACKET_TEMPLATES = (
     "检测到财富气息，大家手速准备！💰",
     "感谢老板！{nickname}宣布你是今天最帅的人！😎",
@@ -210,7 +212,7 @@ class WeChatNativeAdapter(Platform):
             return ignored("missing_sender")
         cfg = self.native_config
         msg_type = raw.get("type")
-        if msg_type == 49 and raw.get("appMessageType") == 2001:
+        if msg_type == 49 and raw.get("appMessageType") in RED_PACKET_APP_TYPES:
             thread = raw["threadId"]
             if (
                 not cfg.enable_group_red_packet_reply

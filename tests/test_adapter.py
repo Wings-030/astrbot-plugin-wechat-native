@@ -103,8 +103,9 @@ async def make_adapter(
     return adapter, queue, msg, sent
 
 
+@pytest.mark.parametrize("app_type", [2001, 47])
 async def test_group_red_packet_reply_rotation_nickname_cooldown_and_dedup(
-    serve, tmp_path, monkeypatch, caplog
+    serve, tmp_path, monkeypatch, caplog, app_type
 ):
     room, other = "room@chatroom", "other@chatroom"
     details = {
@@ -115,7 +116,7 @@ async def test_group_red_packet_reply_rotation_nickname_cooldown_and_dedup(
     monkeypatch.setattr(
         module("adapter"), "time", SimpleNamespace(time=time.time, monotonic=lambda: now)
     )
-    msg = message(threadId=room, type=49, appMessageType=2001, body=None)
+    msg = message(threadId=room, type=49, appMessageType=app_type, body=None)
     adapter, queue, _, sent = await make_adapter(
         serve,
         tmp_path,
@@ -176,6 +177,7 @@ async def test_group_red_packet_reply_rotation_nickname_cooldown_and_dedup(
         ({"direction": "outgoing"}, {}, "live"),
         ({"recall": {}}, {}, "live"),
         ({"appMessageType": 2000}, {}, "live"),
+        ({"type": 47, "appMessageType": None}, {}, "live"),
         ({"type": 1, "body": "恭喜发财，红包 🧧"}, {}, "live"),
         ({}, {}, "history_sync"),
     ],
