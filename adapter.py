@@ -92,7 +92,8 @@ class RedPacketReplies:
         self.remaining = list(RED_PACKET_TEMPLATES)
         random.shuffle(self.remaining)
         index = next(
-            i for i, template in enumerate(self.remaining)
+            i
+            for i, template in enumerate(self.remaining)
             if template != self.last_template and available(template)
         )
         return self.remaining.pop(index)

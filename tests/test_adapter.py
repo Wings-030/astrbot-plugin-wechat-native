@@ -48,7 +48,13 @@ def no_telemetry(monkeypatch):
 
 
 async def make_adapter(
-    serve, tmp_path, msg=None, *, media_data=VALID_JPEG, group_details=None, send_status=200,
+    serve,
+    tmp_path,
+    msg=None,
+    *,
+    media_data=VALID_JPEG,
+    group_details=None,
+    send_status=200,
     **options,
 ):
     msg = msg or message()
