@@ -6,6 +6,7 @@ import json
 import re
 import time
 import unicodedata
+from datetime import datetime
 
 from .native_client import NativeAPIError
 from .tool_support import ToolError, context, encode, error_result, result
@@ -151,8 +152,24 @@ class WeChatActions:
                     self.adapter.bot_self_id,
                 ):
                     candidates.append(item)
-            if len(candidates) != 1:
-                raise ToolError("ambiguous_target")
+            if not candidates:
+                raise ToolError("ambiguous_target", "no_own_message")
+            if len(candidates) > 1:
+                # History can contain many own messages. Resolve "the last one"
+                # by its actual timestamp, never by incidental response order.
+                dated = []
+                for item in candidates:
+                    try:
+                        created = datetime.fromisoformat(item["createdAt"])
+                    except (KeyError, TypeError, ValueError):
+                        raise ToolError("ambiguous_target", "message_time_unknown") from None
+                    if created.tzinfo is None:
+                        raise ToolError("ambiguous_target", "message_time_unknown")
+                    dated.append((created, item))
+                newest = max(created for created, _ in dated)
+                candidates = [item for created, item in dated if created == newest]
+                if len(candidates) != 1:
+                    raise ToolError("ambiguous_target", "latest_message_time_tied")
             message_id = candidates[0].get("id")
             if not isinstance(message_id, str) or not 1 <= len(message_id) <= 512:
                 raise ToolError("ambiguous_target")

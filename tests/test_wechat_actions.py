@@ -282,10 +282,125 @@ async def test_recall_recent_ambiguity_does_not_submit(serve, tmp_path):
             {
                 "items": [
                     message(
-                        id="own1", threadId="room@chatroom", direction="outgoing", senderId="bot"
+                        id="own1",
+                        threadId="room@chatroom",
+                        direction="outgoing",
+                        senderId="bot",
+                        createdAt="2026-11-09T05:00:00Z",
                     ),
                     message(
-                        id="own2", threadId="room@chatroom", direction="outgoing", senderId="bot"
+                        id="own2",
+                        threadId="room@chatroom",
+                        direction="outgoing",
+                        senderId="bot",
+                        createdAt="2026-11-09T05:00:00Z",
+                    ),
+                ],
+                "nextCursor": None,
+            }
+        )
+
+    adapter.client.api_url = await serve(handler)
+    try:
+        plugin = object.__new__(module("main").WeChatNativePlugin)
+        assert (
+            json.loads(await plugin.wechat_recall_own_message(event))["status"]
+            == "ambiguous_target"
+        )
+        assert requests == ["GET"]
+    finally:
+        await adapter.terminate()
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("recalled", [False, True])
+async def test_recall_without_id_selects_latest_own_message(serve, tmp_path, reverse, recalled):
+    adapter, event, _ = await action_event(serve, tmp_path, wechat_action_admins=["user"])
+    older = message(
+        id="old",
+        threadId="room@chatroom",
+        direction="outgoing",
+        senderId="bot",
+        createdAt="2026-11-09T13:00:00+08:00",
+        serverId="901",
+    )
+    latest = message(
+        id="latest",
+        threadId="room@chatroom",
+        direction="outgoing",
+        senderId="bot",
+        createdAt="2026-11-09T05:00:01Z",
+        serverId="18446744073709551615",
+    )
+    if recalled:
+        latest["recall"] = {"observedAt": "2026-11-09T05:00:02Z"}
+    items = [older, latest, message(threadId="room@chatroom", createdAt="2026-11-09T05:00:03Z")]
+    if reverse:
+        items.reverse()
+    requests = []
+
+    async def handler(req):
+        requests.append((req.method, req.path))
+        if req.path.endswith("/messages"):
+            return web.json_response({"items": items, "nextCursor": None})
+        if req.method == "GET":
+            assert req.path.endswith("/messages/latest")
+            return web.json_response(latest)
+        assert req.path.endswith("/messages/latest/recall")
+        assert await req.json() == {"serverId": "18446744073709551615"}
+        return web.json_response(
+            {
+                "id": "recall-latest",
+                "accountId": "a",
+                "kind": "message_recall",
+                "state": "succeeded",
+                "result": {
+                    "messageId": "latest",
+                    "threadId": "room@chatroom",
+                    "serverId": "18446744073709551615",
+                    "status": "recalled",
+                    "remoteOutcome": "confirmed",
+                    "profileProjection": "complete",
+                },
+            }
+        )
+
+    adapter.client.api_url = await serve(handler)
+    try:
+        plugin = object.__new__(module("main").WeChatNativePlugin)
+        value = json.loads(await plugin.wechat_recall_own_message(event))
+        assert value["status"] == ("already_recalled" if recalled else "success")
+        assert sum(method == "POST" for method, _ in requests) == (0 if recalled else 1)
+        assert all("/old" not in path for _, path in requests)
+    finally:
+        await adapter.terminate()
+
+
+@pytest.mark.parametrize(
+    "timestamp", [None, "invalid", "2026-11-09T05:00:00", "2026-11-09T13:00:00+08:00"]
+)
+async def test_recall_without_id_refuses_uncertain_message_order(serve, tmp_path, timestamp):
+    adapter, event, _ = await action_event(serve, tmp_path, wechat_action_admins=["user"])
+    requests = []
+
+    async def handler(req):
+        requests.append(req.method)
+        return web.json_response(
+            {
+                "items": [
+                    message(
+                        id="own1",
+                        threadId="room@chatroom",
+                        direction="outgoing",
+                        senderId="bot",
+                        createdAt="2026-11-09T05:00:00Z",
+                    ),
+                    message(
+                        id="own2",
+                        threadId="room@chatroom",
+                        direction="outgoing",
+                        senderId="bot",
+                        createdAt=timestamp,
                     ),
                 ],
                 "nextCursor": None,
