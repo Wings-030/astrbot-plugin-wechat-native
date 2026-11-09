@@ -175,7 +175,16 @@ class WeChatNativeAdapter(Platform):
         # The base Platform.create_event returns a generic event whose send()
         # only records metrics, so replies to re-injected messages silently
         # never reach WeChat.
-        return WeChatNativeEvent(message, self)
+        event = WeChatNativeEvent(message, self)
+        original = self._events.get(message.message_id)
+        if (
+            original is not None
+            and isinstance(message.raw_message, dict)
+            and message.raw_message == original.message_obj.raw_message
+        ):
+            # Preserve trusted event ownership across framework re-injection.
+            self._events[message.message_id] = event
+        return event
 
     def get_client(self):
         return self.client
