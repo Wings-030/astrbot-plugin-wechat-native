@@ -491,6 +491,10 @@ docker compose exec -T astrbot python -c \
 重放与分段回复不重复计数；部分发送不计为成功回复，归入待核对。
 面板每 30 秒自动刷新，后台页面暂停刷新；配置概览可展开查看。
 
+面板预览（以下为示例数据）：
+
+![WeChat Native 面板：连接状态、消息统计与最近 7 天趋势](docs/wechat-native-panel.png)
+
 排查网络时，可从 AstrBot 容器执行只读检查，不输出 Token：
 
 ```bash
