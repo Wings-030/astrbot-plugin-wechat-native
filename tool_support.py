@@ -105,11 +105,12 @@ def _is_owned_reloaded_native_event(event, adapter, adapter_type):
         return False
 
     event_type, actual_adapter_type = type(event), type(adapter)
-    if (
-        (event_type.__module__, event_type.__qualname__)
-        != (WeChatNativeEvent.__module__, WeChatNativeEvent.__qualname__)
-        or (actual_adapter_type.__module__, actual_adapter_type.__qualname__)
-        != (adapter_type.__module__, adapter_type.__qualname__)
+    if (event_type.__module__, event_type.__qualname__) != (
+        WeChatNativeEvent.__module__,
+        WeChatNativeEvent.__qualname__,
+    ) or (actual_adapter_type.__module__, actual_adapter_type.__qualname__) != (
+        adapter_type.__module__,
+        adapter_type.__qualname__,
     ):
         return False
 

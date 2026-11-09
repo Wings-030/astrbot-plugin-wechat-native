@@ -44,6 +44,7 @@ async def test_foreign_event_logs_event_mismatch(caplog):
     assert result["status"] == "not_available"
     assert "reason=event_type_mismatch" in caplog.text
 
+
 async def test_reloaded_tool_class_accepts_adapter_owned_event(serve, tmp_path, monkeypatch):
     adapter, event, msg = await tool_event(serve, tmp_path, enable_history_tools=True)
     support = module("tool_support")

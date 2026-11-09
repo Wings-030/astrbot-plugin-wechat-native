@@ -24,8 +24,6 @@ jobs:
         run: python -m playwright install --with-deps chromium
       - name: Lint
         run: ruff check .
-      - name: Show formatting diff (temporary diagnostic)
-        run: ruff format --diff tool_support.py tests/test_tool_diagnostics.py
       - name: Format
         run: ruff format --check .
       - name: Test with mock Native HTTP/SSE (no WeChat credentials)
