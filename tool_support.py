@@ -4,6 +4,8 @@ import json
 from dataclasses import dataclass
 
 from astrbot.api import logger
+from astrbot.api.event import AstrMessageEvent
+from astrbot.api.platform import Platform
 
 from .event import WeChatNativeEvent, session_id, session_target
 from .native_client import NativeAPIError
@@ -97,21 +99,61 @@ class ToolContext:
     message_id: str
 
 
+def _is_owned_reloaded_native_event(event, adapter, adapter_type):
+    """Allow class identity drift only for a trusted event from an adapter generation."""
+    if not isinstance(event, AstrMessageEvent) or not isinstance(adapter, Platform):
+        return False
+
+    event_type, actual_adapter_type = type(event), type(adapter)
+    if (event_type.__module__, event_type.__qualname__) != (
+        WeChatNativeEvent.__module__,
+        WeChatNativeEvent.__qualname__,
+    ) or (actual_adapter_type.__module__, actual_adapter_type.__qualname__) != (
+        adapter_type.__module__,
+        adapter_type.__qualname__,
+    ):
+        return False
+
+    # Resolve the classes held by the adapter's own module generation.
+    # A matching name alone must never authorize a tool invocation.
+    factory = getattr(actual_adapter_type, "create_event", None)
+    namespace = getattr(factory, "__globals__", None)
+    if not isinstance(namespace, dict) or (
+        namespace.get("WeChatNativeEvent") is not event_type
+        or namespace.get("WeChatNativeAdapter") is not actual_adapter_type
+    ):
+        return False
+
+    message_id = getattr(getattr(event, "message_obj", None), "message_id", None)
+    retained = getattr(adapter, "_events", None)
+    return (
+        isinstance(message_id, str)
+        and bool(message_id)
+        and retained is not None
+        and retained.get(message_id) is event
+    )
+
+
 def context(event, *, write=False, group=False):
     from .adapter import WeChatNativeAdapter
 
-    if not isinstance(event, WeChatNativeEvent):
-        logger.warning(
-            "WeChat Native 工具事件类型：actual=%s.%s expected=%s.%s",
-            type(event).__module__,
-            type(event).__qualname__,
-            WeChatNativeEvent.__module__,
-            WeChatNativeEvent.__qualname__,
-        )
-        raise ToolError("not_available", "event_type_mismatch")
-    if not isinstance(event.adapter, WeChatNativeAdapter):
+    adapter = getattr(event, "adapter", None)
+    event_match = isinstance(event, WeChatNativeEvent)
+    adapter_match = isinstance(adapter, WeChatNativeAdapter)
+    if not (event_match and adapter_match) and not _is_owned_reloaded_native_event(
+        event, adapter, WeChatNativeAdapter
+    ):
+        if not event_match:
+            logger.warning(
+                "WeChat Native 工具事件类型：actual=%s.%s expected=%s.%s",
+                type(event).__module__,
+                type(event).__qualname__,
+                WeChatNativeEvent.__module__,
+                WeChatNativeEvent.__qualname__,
+            )
+            raise ToolError("not_available", "event_type_mismatch")
         raise ToolError("not_available", "adapter_type_mismatch")
-    adapter, raw = event.adapter, event.message_obj.raw_message
+    raw = event.message_obj.raw_message
     cfg = adapter.native_config
     enabled = cfg.enable_wechat_actions if write else cfg.enable_history_tools
     if adapter.stopped or adapter._state_closed:
