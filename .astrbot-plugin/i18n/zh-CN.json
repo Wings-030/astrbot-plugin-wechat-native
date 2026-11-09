@@ -1,8 +1,8 @@
 {
   "views": {
     "connection": {
-      "title": "连接测试",
-      "description": "检查 Native 服务连接与微信账号在线状态。"
+      "title": "WeChat Native 面板",
+      "description": "查看连接状态、每日消息统计与配置概览。"
     }
   }
 }

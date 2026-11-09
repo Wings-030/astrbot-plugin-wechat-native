@@ -109,6 +109,30 @@ async def make_adapter(
     return adapter, queue, msg, sent
 
 
+async def test_panel_statistics_count_live_incoming_once(serve, tmp_path):
+    from astrbot.api.event import MessageChain
+
+    state_module = module("state")
+    adapter, queue, msg, sent = await make_adapter(serve, tmp_path)
+    try:
+        await adapter.process_native_event(native_event(msg))
+        event = queue.get_nowait()
+        await event.send(MessageChain().message("first"))
+        await event.send(MessageChain().message("second"))
+        await adapter.process_native_event(native_event(msg, "2"))
+        msg.update(id="out", serverId="901", direction="outgoing")
+        await adapter.process_native_event(native_event(msg, "3"))
+        msg.update(id="history", serverId="902", direction="incoming")
+        await adapter.process_native_event(native_event(msg, "4", origin="backfill"))
+        result = state_module.read_statistics(next(tmp_path.glob("*.sqlite3")))
+        assert len(sent) == 2
+        assert result["today"]["received"] == 1
+        assert result["today"]["replied"] == 1
+        assert result["today"]["failed"] == 0
+    finally:
+        await adapter.terminate()
+
+
 @pytest.mark.parametrize("app_type", [2001, 47])
 async def test_group_red_packet_reply_rotation_nickname_cooldown_and_dedup(
     serve, tmp_path, monkeypatch, caplog, app_type

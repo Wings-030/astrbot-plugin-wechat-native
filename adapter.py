@@ -1,7 +1,6 @@
 """Registered in-process AstrBot platform adapter."""
 
 import asyncio
-import hashlib
 import random
 import re
 import time
@@ -57,7 +56,7 @@ from .native_client import (
     load_outgoing_image,
     load_outgoing_voice,
 )
-from .state import StateStore, cursor_number
+from .state import StateStore, cursor_number, state_path
 from .summary import GroupSummaryCache, is_summary_command
 from .wechat_actions import WeChatActions
 
@@ -131,9 +130,8 @@ class WeChatNativeAdapter(Platform):
         # PlatformManager owns client_self_id (its instance/task UUID).
         self.bot_self_id = cfg.account_id
         root = state_dir if state_dir is not None else StarTools.get_data_dir(PLUGIN_ID)
-        identity = f"{cfg.api_url}\n{cfg.account_id}\n{platform_config.get('id', ADAPTER_ID)}"
         self.state = StateStore(
-            Path(root) / (hashlib.sha256(identity.encode()).hexdigest() + ".sqlite3")
+            state_path(root, cfg.api_url, cfg.account_id, platform_config.get("id", ADAPTER_ID))
         )
         self.stopped = False
         self._state_closed = False
@@ -934,8 +932,15 @@ class WeChatNativeAdapter(Platform):
         ):
             raise ValueError("message_identity_mismatch")
         origin = data.get("origin", "unknown")
+        received = (
+            origin == "live"
+            and raw.get("direction") == "incoming"
+            and raw.get("senderId") != self.bot_self_id
+        )
         if self.loop_guard.blocked(thread):
-            self.state.accept(cursor, message_id, thread, raw.get("serverId"), "ignored")
+            self.state.accept(
+                cursor, message_id, thread, raw.get("serverId"), "ignored", received=received
+            )
             return
         kind = self._classify(raw, origin)
         logger.debug(
@@ -952,7 +957,9 @@ class WeChatNativeAdapter(Platform):
             self.native_config.enable_private_reply,
         )
         if kind == "red_packet":
-            if self.state.accept(cursor, message_id, thread, raw.get("serverId"), "queued"):
+            if self.state.accept(
+                cursor, message_id, thread, raw.get("serverId"), "queued", received=received
+            ):
                 await self._reply_to_red_packet(raw)
             return
         eligible = kind != "ignore"
@@ -965,7 +972,12 @@ class WeChatNativeAdapter(Platform):
             else None
         )
         fresh = self.state.accept(
-            cursor, message_id, thread, raw.get("serverId"), "queued" if eligible else "ignored"
+            cursor,
+            message_id,
+            thread,
+            raw.get("serverId"),
+            "queued" if eligible else "ignored",
+            received=received,
         )
         recent_kind, recent_source = None, None
         if fresh:

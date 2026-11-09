@@ -219,3 +219,40 @@ async def test_connection_view_is_discovered_by_astrbot():
     pages = await service.discover_plugin_pages(metadata)
     assert [page.name for page in pages] == ["connection"]
     assert pages[0].entry_file == "index.html"
+
+
+async def test_panel_reads_journal_without_recovering_or_requiring_token(tmp_path, monkeypatch):
+    from astrbot.api.star import StarTools
+
+    state_module = module("state")
+    monkeypatch.setattr(StarTools, "get_data_dir", lambda _: tmp_path)
+    robot = saved_robot("http://native.example", token_file="/unreadable/token")
+    _, context = plugin([robot])
+    path = state_module.state_path(tmp_path, "http://native.example/v1", "a", "native-1")
+    state = state_module.StateStore(path)
+    try:
+        state.accept("1", "m1", "p", "1", "queued")
+        result = await api(context, "panel", "bot_id=native-1")
+        assert result["statistics"]["today"]["received"] == 1
+        assert result["statistics"]["pending_review"] == 0
+        assert result["config"]["enable_private_reply"] is True
+        assert result["config"]["allowed_users"] == 0
+        assert state.message_status("m1") == "queued"
+        text = json.dumps(result)
+        for secret in ("unreadable", "synthetic-view-token", "native.example", "m1"):
+            assert secret not in text
+    finally:
+        state.close()
+
+
+async def test_panel_empty_wrong_robot_and_invalid_config_are_safe(tmp_path, monkeypatch):
+    from astrbot.api.star import StarTools
+
+    monkeypatch.setattr(StarTools, "get_data_dir", lambda _: tmp_path)
+    _, context = plugin([saved_robot("http://native.example")])
+    result = await api(context, "panel", "bot_id=native-1")
+    assert result["statistics"]["available"] is False
+    assert not list(tmp_path.iterdir())
+    assert (await api(context, "panel", "bot_id=other"))["reason"]
+    context._config["platform"][0]["server_url"] = "invalid"
+    assert (await api(context, "panel", "bot_id=native-1"))["reason"]

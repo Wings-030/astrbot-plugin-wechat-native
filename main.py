@@ -112,6 +112,9 @@ class WeChatNativePlugin(Star):
         context.register_web_api(
             f"/{PLUGIN_ID}/connection/check", view.check, ["GET"], "只读测试 Native 连接"
         )
+        context.register_web_api(
+            f"/{PLUGIN_ID}/connection/panel", view.panel, ["GET"], "读取微信面板统计"
+        )
 
     @filter.on_llm_request()
     async def attach_pdf_text(self, event: AstrMessageEvent, req: ProviderRequest):

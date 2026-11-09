@@ -3,31 +3,84 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>WeChat Native · 连接测试</title>
+    <title>WeChat Native 面板</title>
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
-    <main class="card" aria-labelledby="title">
+    <main class="panel" aria-labelledby="title">
       <header>
-        <span class="mark" aria-hidden="true">W</span>
-        <h1 id="title">WeChat Native</h1>
-      </header>
-      <div id="robot-picker" class="picker" hidden>
-        <label for="robot-select">机器人</label>
-        <select id="robot-select"></select>
-      </div>
-      <dl>
-        <div>
-          <dt>连接状态</dt>
-          <dd id="connection-status" data-state="unchecked" role="status" aria-live="polite">未检测</dd>
+        <div class="brand">
+          <span class="mark" aria-hidden="true">W</span>
+          <div>
+            <h1 id="title">WeChat Native 面板</h1>
+            <p class="subtitle">连接与消息概览</p>
+          </div>
         </div>
-        <div>
-          <dt>微信在线状态</dt>
-          <dd id="wechat-status">未检测</dd>
+        <button id="test-connection" type="button" disabled>
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 7a7 7 0 0 1 11.5-1L20 9M4 15l2.4 3A7 7 0 0 0 17.9 17"/></svg>
+          刷新
+        </button>
+      </header>
+      <section class="connection" aria-label="连接状态">
+        <div id="robot-picker" class="picker" hidden>
+          <label for="robot-select">机器人</label>
+          <select id="robot-select"></select>
+        </div>
+        <dl class="statuses">
+          <div>
+            <dt>Native</dt>
+            <dd id="connection-status" data-state="unchecked" role="status" aria-live="polite">未检测</dd>
+          </div>
+          <div>
+            <dt>微信</dt>
+            <dd id="wechat-status">未检测</dd>
+          </div>
+        </dl>
+        <time id="updated-at">尚未刷新</time>
+      </section>
+      <p id="failure-reason" class="notice error" role="alert" hidden></p>
+      <dl class="metrics" aria-label="消息统计">
+        <div class="metric">
+          <dt>今日接收</dt>
+          <dd id="today-received">—</dd>
+          <span>入站消息</span>
+        </div>
+        <div class="metric">
+          <dt>今日已回复</dt>
+          <dd id="today-replied">—</dd>
+          <span>按原消息去重</span>
+        </div>
+        <div class="metric">
+          <dt>今日失败</dt>
+          <dd id="today-failed">—</dd>
+          <span>处理失败</span>
+        </div>
+        <div class="metric">
+          <dt>待核对</dt>
+          <dd id="pending-review">—</dd>
+          <span>含部分发送 · 全部日期</span>
         </div>
       </dl>
-      <p id="failure-reason" role="alert" hidden></p>
-      <button id="test-connection" type="button" disabled>测试连接</button>
+      <section class="chart-card" aria-labelledby="chart-title">
+        <div class="section-heading">
+          <h2 id="chart-title">消息趋势 <span>最近 7 天</span></h2>
+          <div class="legend" aria-label="图例">
+            <span><i class="received" aria-hidden="true"></i>接收</span>
+            <span><i class="replied" aria-hidden="true"></i>已回复</span>
+          </div>
+        </div>
+        <div class="chart-wrap">
+          <svg id="daily-chart" role="group" aria-label="最近七天接收与已回复消息柱形图" aria-describedby="chart-detail"></svg>
+          <p id="chart-empty">暂无统计数据</p>
+        </div>
+        <p id="chart-detail" class="chart-detail" aria-live="polite">将指针移到柱形上或用 Tab 查看每日数量</p>
+        <p id="panel-note" class="panel-note" role="status">统计加载中…</p>
+      </section>
+      <details class="config-card">
+        <summary>配置概览</summary>
+        <dl id="config-content"></dl>
+      </details>
+      <footer>每 30 秒自动刷新 · 后台页面暂停刷新</footer>
     </main>
     <script type="module" src="./app.js"></script>
   </body>

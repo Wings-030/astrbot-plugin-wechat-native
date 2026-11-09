@@ -1,11 +1,13 @@
-"""Read-only connection checks for the AstrBot Plugin View."""
+"""Read-only connection checks and statistics for the AstrBot Plugin View."""
 
 import asyncio
 
+from astrbot.api.star import StarTools
 from astrbot.api.web import json_response, request
 
-from .config import ADAPTER_ID, NativeConfig
+from .config import ADAPTER_ID, PLUGIN_ID, NativeConfig
 from .native_client import NativeAPIError, NativeClient
+from .state import read_statistics, state_path
 
 
 def _json(data):
@@ -40,6 +42,42 @@ class ConnectionView:
 
     async def bots(self):
         return _json({"bots": [{"id": robot["id"]} for robot in self._robots()]})
+
+    async def panel(self):
+        bot_id = request.query.get("bot_id", "")
+        robot = next((robot for robot in self._robots() if robot["id"] == bot_id), None)
+        if robot is None:
+            return _json({"reason": "请选择已保存的 WeChat Native 机器人"})
+        try:
+            config = NativeConfig.from_dict(robot)
+        except (TypeError, ValueError):
+            return _json({"reason": "配置无效，请检查机器人配置"})
+        path = state_path(
+            StarTools.get_data_dir(PLUGIN_ID), config.api_url, config.account_id, bot_id
+        )
+        statistics = await asyncio.to_thread(read_statistics, path)
+        return _json(
+            {
+                "statistics": statistics,
+                "config": {
+                    **{
+                        key: getattr(config, key)
+                        for key in (
+                            "enable_private_reply",
+                            "group_reply_mode",
+                            "enable_media",
+                            "enable_group_summary",
+                            "enable_history_tools",
+                            "enable_wechat_actions",
+                            "enable_group_red_packet_reply",
+                            "unique_session",
+                        )
+                    },
+                    "allowed_users": len(config.allowed_users),
+                    "allowed_groups": len(config.allowed_groups),
+                },
+            }
+        )
 
     async def check(self):
         bot_id = request.query.get("bot_id", "")

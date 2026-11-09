@@ -4,8 +4,73 @@ The AstrBot queue cannot participate in a database transaction. A crash after
 handoff is therefore retained for review rather than automatically handed off twice.
 """
 
+import hashlib
 import sqlite3
+from contextlib import closing
+from datetime import datetime, timedelta
 from pathlib import Path
+
+
+def state_path(root: Path, api_url: str, account_id: str, bot_id: str) -> Path:
+    identity = f"{api_url}\n{account_id}\n{bot_id}"
+    return Path(root) / (hashlib.sha256(identity.encode()).hexdigest() + ".sqlite3")
+
+
+def read_statistics(path: Path) -> dict:
+    """Read a snapshot without running journal migration or crash recovery."""
+    unavailable = {"available": False, "days": [], "today": None, "pending_review": None}
+    try:
+        if not path.exists():
+            return unavailable
+        with closing(
+            sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
+        ) as db:
+            db.row_factory = sqlite3.Row
+            db.execute("BEGIN")
+            tables = {
+                row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            if not {"settings", "messages", "message_days"}.issubset(tables):
+                return unavailable
+            since = db.execute("SELECT value FROM settings WHERE key='statistics_since'").fetchone()
+            if since is None:
+                return unavailable
+            now = datetime.now().astimezone()
+            dates = [(now.date() - timedelta(days=i)).isoformat() for i in reversed(range(7))]
+            rows = db.execute(
+                "SELECT d.day, COUNT(*) AS received, SUM(m.status='replied') AS replied, "
+                "SUM(m.status='failed') AS failed, SUM(m.status='partial') AS partial "
+                "FROM message_days d JOIN messages m ON m.id=d.message_id "
+                "WHERE d.day BETWEEN ? AND ? GROUP BY d.day",
+                (dates[0], dates[-1]),
+            ).fetchall()
+            counts = {row["day"]: dict(row) for row in rows}
+            days = []
+            for day in dates:
+                empty = None if day < since[0][:10] else 0
+                row = counts.get(day, {})
+                days.append(
+                    {
+                        "date": day,
+                        **{
+                            key: row.get(key, empty)
+                            for key in ("received", "replied", "failed", "partial")
+                        },
+                    }
+                )
+            pending = db.execute(
+                "SELECT COUNT(*) FROM messages WHERE status IN ('needs_review','partial')"
+            ).fetchone()[0]
+            return {
+                "available": True,
+                "days": days,
+                "today": days[-1],
+                "pending_review": pending,
+                "since": since[0],
+                "timezone": now.tzname(),
+            }
+    except (sqlite3.Error, OSError, ValueError):
+        return {**unavailable, "reason": "无法读取统计，请检查机器人状态库是否可用"}
 
 
 def cursor_number(value: str) -> int:
@@ -49,6 +114,9 @@ class StateStore:
                 thread TEXT NOT NULL, server_id TEXT NOT NULL, PRIMARY KEY(thread, server_id));
             CREATE TABLE IF NOT EXISTS messages (
                 id TEXT PRIMARY KEY, thread TEXT NOT NULL, server_id TEXT, status TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS message_days (
+                message_id TEXT PRIMARY KEY, day TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS message_days_day ON message_days(day);
             CREATE TABLE IF NOT EXISTS sends (
                 key TEXT PRIMARY KEY, message_id TEXT, thread TEXT NOT NULL,
                 state TEXT NOT NULL, send_id TEXT);
@@ -59,6 +127,10 @@ class StateStore:
                 PRIMARY KEY(key, part));
         """)
         with self.db:
+            self.db.execute(
+                "INSERT OR IGNORE INTO settings VALUES ('statistics_since', ?)",
+                (datetime.now().astimezone().isoformat(),),
+            )
             self.db.execute(
                 "UPDATE messages SET status='partial' WHERE status IN ('queued','needs_review') "
                 "AND EXISTS (SELECT 1 FROM sends JOIN send_chunks USING(key) "
@@ -182,7 +254,14 @@ class StateStore:
             self._advance(cursor)
 
     def accept(
-        self, cursor: str, message_id: str, thread: str, server_id: str | None, status: str
+        self,
+        cursor: str,
+        message_id: str,
+        thread: str,
+        server_id: str | None,
+        status: str,
+        *,
+        received: bool = True,
     ) -> bool:
         existing = self.db.execute(
             "SELECT thread, server_id FROM messages WHERE id=?", (message_id,)
@@ -198,6 +277,11 @@ class StateStore:
                 "INSERT OR IGNORE INTO messages VALUES (?, ?, ?, ?)",
                 (message_id, thread, server_id, "recalled" if recalled else status),
             )
+            if result.rowcount == 1 and received:
+                self.db.execute(
+                    "INSERT INTO message_days VALUES (?, ?)",
+                    (message_id, datetime.now().astimezone().date().isoformat()),
+                )
             self._advance(cursor)
             return result.rowcount == 1 and not recalled
 
