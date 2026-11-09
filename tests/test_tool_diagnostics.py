@@ -1,9 +1,50 @@
+import importlib
 import json
 
+import pytest
 from aiohttp import web
 from astrbot.api import logger  # noqa: F401
 from conftest import module
 from test_history_tools import tool_event
+
+
+@pytest.mark.parametrize(
+    "admins,expected", [([], "permission_denied"), (["user"], "ambiguous_target")]
+)
+async def test_recall_without_id_preserves_business_error_after_reload(
+    serve, tmp_path, caplog, admins, expected
+):
+    adapter, event, _ = await tool_event(
+        serve, tmp_path, enable_wechat_actions=True, wechat_action_admins=admins
+    )
+    plugin = object.__new__(module("main").WeChatNativePlugin)
+    # Existing action instances keep the exception class imported before reload.
+    importlib.reload(module("tool_support"))
+    requests = []
+
+    async def handler(req):
+        requests.append(req.method)
+        return web.json_response({"items": [], "nextCursor": None})
+
+    adapter.client.api_url = await serve(handler)
+    try:
+        value = json.loads(await plugin.wechat_recall_own_message(event))
+        assert value["status"] == expected
+        assert value["ok"] is False
+        assert requests == (["GET"] if admins else [])
+        assert f"status={expected}" in caplog.text
+    finally:
+        await adapter.terminate()
+
+
+def test_foreign_tool_error_is_not_trusted(caplog):
+    support = module("tool_support")
+    foreign_type = type("ToolError", (Exception,), {"__module__": support.__name__})
+    error = foreign_type("synthetic-secret")
+    error.status = "success"
+    error.reason = "synthetic-secret"
+    assert support.error_result("recall_own_message", error)["status"] == "failed"
+    assert "synthetic-secret" not in caplog.text
 
 
 async def test_disabled_history_logs_runtime_reason_without_request(serve, tmp_path, caplog):

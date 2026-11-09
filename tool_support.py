@@ -59,7 +59,17 @@ def encode(value):
 
 
 def error_result(action, error):
-    if isinstance(error, ToolError):
+    error_type = type(error)
+    # importlib.reload replaces ToolError, but existing action instances retain
+    # its old class. Trust only classes defined in this module's namespace;
+    # matching an exception name or status attribute alone is insufficient.
+    local_tool_error = (
+        error_type.__module__ == ToolError.__module__
+        and error_type.__qualname__ == ToolError.__qualname__
+        and getattr(error_type.__init__, "__globals__", None) is globals()
+        and getattr(error, "status", None) in MESSAGES
+    )
+    if isinstance(error, ToolError) or local_tool_error:
         status = error.status
         logger.warning(
             "WeChat Native 工具拒绝：action=%s status=%s reason=%s", action, status, error.reason
