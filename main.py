@@ -1,7 +1,10 @@
 """AstrBot plugin entry point. Import registers the robot type in the dashboard."""
 
 import asyncio
+import tempfile
+from pathlib import Path
 
+from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star
@@ -21,6 +24,7 @@ from .group_ranking import (
 )
 from .history_tools import run_read
 from .mention_tools import run_mention
+from .pat import PAT_REFERENCE
 from .summary import SUMMARY_SYSTEM_PROMPT, summary_prompt
 from .tool_support import ToolError, is_native_event
 from .tool_support import context as tool_context
@@ -147,6 +151,41 @@ class WeChatNativePlugin(Star):
         context.register_web_api(
             f"/{PLUGIN_ID}/connection/panel", view.panel, ["GET"], "读取微信面板统计"
         )
+
+    @filter.on_llm_request()
+    async def attach_pat_context(self, event: AstrMessageEvent, req: ProviderRequest):
+        if not isinstance(event, WeChatNativeEvent):
+            return
+        voice = event.get_extra("wechat_native_pat_voice")
+        if voice is not None and not event.get_extra("wechat_native_pat_stt_done"):
+            event.set_extra("wechat_native_pat_stt_done", True)
+            event.set_extra("wechat_native_pat_voice", None)
+            try:
+                config = self.context.get_config(event.unified_msg_origin)
+                if config.get("provider_stt_settings", {}).get("enable", False):
+                    async with asyncio.timeout(60):
+                        provider = await self.context.get_using_stt_provider_async(
+                            event.unified_msg_origin
+                        )
+                        if provider:
+                            with tempfile.TemporaryDirectory(prefix="wechat-pat-") as directory:
+                                path = Path(directory) / "voice.wav"
+                                await asyncio.to_thread(path.write_bytes, voice)
+                                text = await provider.get_text(audio_url=str(path))
+                            if isinstance(text, str) and text.strip():
+                                event.set_extra("wechat_native_pat_transcript", text[:8000])
+            except Exception:
+                logger.info(
+                    "WeChat Native 拍一拍语音转写不可用：message=%s", event.message_obj.message_id
+                )
+        text = event.get_extra("wechat_native_pat_transcript")
+        if text and not any(
+            isinstance(part, TextPart) and part.text.startswith(PAT_REFERENCE)
+            for part in req.extra_user_content_parts
+        ):
+            req.extra_user_content_parts.append(
+                TextPart(text=f"{PAT_REFERENCE}\n[语音转写]\n{text}\n[参考消息结束]")
+            )
 
     @filter.on_llm_request()
     async def attach_pdf_text(self, event: AstrMessageEvent, req: ProviderRequest):

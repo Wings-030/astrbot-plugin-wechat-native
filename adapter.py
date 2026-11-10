@@ -56,6 +56,8 @@ from .native_client import (
     load_outgoing_image,
     load_outgoing_voice,
 )
+from .pat import pat_actor, reference_current
+from .pat import prepare as prepare_pat
 from .state import StateStore, cursor_number, state_path
 from .summary import GroupSummaryCache, is_summary_command
 from .wechat_actions import WeChatActions
@@ -143,6 +145,7 @@ class WeChatNativeAdapter(Platform):
         self._recent_group_pdfs = OrderedDict()
         self._recent_group_voices = OrderedDict()
         self._red_packet_replies: dict[str, RedPacketReplies] = {}
+        self._pat_attempts: dict[str, float] = {}
         self._events = weakref.WeakValueDictionary()
         self._send_lock = asyncio.Lock()
         self.loop_guard = LoopGuard(self.state, cfg.account_id)
@@ -153,10 +156,11 @@ class WeChatNativeAdapter(Platform):
         self.summary_cache = GroupSummaryCache(cfg.summary_max_messages, cfg.summary_window_minutes)
         logger.info(
             "WeChat Native 运行时工具开关："
-            "history_tools=%s wechat_actions=%s admin_token_loaded=%s",
+            "history_tools=%s wechat_actions=%s admin_token_loaded=%s pat_reply=%s",
             cfg.enable_history_tools,
             cfg.enable_wechat_actions,
             self.admin_client is not None,
+            cfg.enable_group_pat_reply,
         )
 
     def meta(self) -> PlatformMetadata:
@@ -219,6 +223,18 @@ class WeChatNativeAdapter(Platform):
         if not isinstance(raw.get("senderId"), str) or not raw["senderId"]:
             return ignored("missing_sender")
         cfg = self.native_config
+        if raw.get("pat") is not None:
+            thread = raw["threadId"]
+            if (
+                not cfg.enable_group_pat_reply
+                or not pat_actor(raw)
+                or raw["pat"].get("targetId") != self.bot_self_id
+                or not thread.endswith("@chatroom")
+                or cfg.group_reply_mode == "disabled"
+                or (cfg.allowed_groups and thread not in cfg.allowed_groups)
+            ):
+                return ignored("pat_not_allowed")
+            return "pat" if self._check_timestamp(raw) else ignored("invalid_timestamp")
         msg_type = raw.get("type")
         if msg_type == 49 and raw.get("appMessageType") in RED_PACKET_APP_TYPES:
             thread = raw["threadId"]
@@ -887,7 +903,11 @@ class WeChatNativeAdapter(Platform):
                         store.pop(key)
             for active in list(self._events.values()):
                 raw = active.message_obj.raw_message
-                reference = active.get_extra("wechat_native_recent_image") or raw.get("quote")
+                reference = (
+                    active.get_extra("wechat_native_pat_reference")
+                    or active.get_extra("wechat_native_recent_image")
+                    or raw.get("quote")
+                )
                 if raw["threadId"] == thread and (raw.get("serverId") == server_id):
                     active.stop_event()
                     media_task = active.get_extra("wechat_native_media_task")
@@ -943,6 +963,8 @@ class WeChatNativeAdapter(Platform):
             )
             return
         kind = self._classify(raw, origin)
+        if raw.get("pat") is not None:
+            logger.info("WeChat Native 拍一拍准入：message=%s result=%s", message_id, kind)
         logger.debug(
             "WeChat Native 消息分类：message=%s type=%s app_type=%s direction=%s "
             "group=%s has_text=%s result=%s enable_media=%s enable_private_reply=%s",
@@ -956,6 +978,26 @@ class WeChatNativeAdapter(Platform):
             self.native_config.enable_media,
             self.native_config.enable_private_reply,
         )
+        if kind == "pat":
+            if not self.state.accept(
+                cursor, message_id, thread, raw.get("serverId"), "queued", received=received
+            ):
+                return
+            now = time.monotonic()
+            if now - self._pat_attempts.get(thread, float("-inf")) < 30:
+                self.state.mark_message(message_id, "no_reply")
+                logger.info("WeChat Native 拍一拍冷却跳过：message=%s", message_id)
+                return
+            self._pat_attempts[thread] = now
+            wrapped = WeChatNativeEvent(
+                convert_message(raw, self.native_config, self.bot_self_id), self
+            )
+            self._events[message_id] = wrapped
+            task = asyncio.create_task(prepare_pat(self, raw, wrapped))
+            wrapped.set_extra("wechat_native_media_task", task)
+            self._media_tasks.add(task)
+            task.add_done_callback(self._media_tasks.discard)
+            return
         if kind == "red_packet":
             if self.state.accept(
                 cursor, message_id, thread, raw.get("serverId"), "queued", received=received
@@ -1185,12 +1227,19 @@ class WeChatNativeAdapter(Platform):
                         logger.warning("WeChat Native 省略自动 @，继续发送回复正文；%s", error)
                         mentions = None
                 if source:
+                    if source.get("pat") is not None and event:
+                        reference = event.get_extra("wechat_native_pat_reference")
+                        if reference and not await reference_current(self, reference):
+                            self.state.mark_message(message_id, "no_reply")
+                            event.stop_event()
+                            return False
                     current = await self.client.message(message_id)
                     if (
                         current.get("id") != message_id
                         or current.get("accountId") != self.native_config.account_id
                         or current.get("threadId") != thread
                         or current.get("serverId") != source.get("serverId")
+                        or current.get("pat") != source.get("pat")
                     ):
                         raise ValueError("reply_source_identity_mismatch")
                     if self.state.message_status(message_id) in {

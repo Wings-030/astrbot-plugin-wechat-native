@@ -45,10 +45,13 @@ Native Token 需要目标账号的 **read + send + media** 权限。本文 Compo
 | `group_reply_mode` | `mention` | `mention`：真正 @机器人；`all`：全部群文本与直接语音都直接唤醒；`probability`：全部进入 AstrBot，但只有 @ 唤醒，其余交给 AstrBot 的主动回复概率；`disabled`：不回复群聊 |
 | `group_reply_style` | `mention` | 群聊回复方式：`mention` @触发者；`quote` 引用触发消息；`plain` 直接发送 |
 | `enable_group_red_packet_reply` | `false` | 群红包自动暖场。在允许回复的群里，无需 @，同群 30 秒内最多回复一次 |
+| `enable_group_pat_reply` | `false` | 群成员拍机器人后，结合之前最近的非机器人文本、图片或语音，按人格回应；需 Native v2.2.1 定制补丁，同群 30 秒一次 |
 | `allowed_groups` | `[]` | 群 threadId 白名单，通常以 `@chatroom` 结尾；空列表允许所有群 |
 | `unique_session` | `true` | 同群不同成员独立会话；关闭后同群共享会话 |
 
 用户 ID 和群 ID 可用 Native 的 `wx contacts find 名字`、`wx chats list` 查询。
+
+拍一拍的 Native 补丁、构建和部署日志说明见 [拍一拍部署说明](native-patches/README.md)。
 手打 `@名字` 或仅 @全体不会触发默认群回复。
 在 **机器人 → WeChat Native → 群聊回复方式** 下拉框中，可选择 **@触发者 / 引用触发消息 / 直接发送**，默认保留 @触发者。
 该设置只控制回复样式，不改变群聊的 @唤醒规则。分段回复仅首段自动 @或引用；纯图片/语音直接发送。

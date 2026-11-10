@@ -39,6 +39,7 @@ DEFAULT_CONFIG = {
     "group_reply_mode": "mention",
     "group_reply_style": "mention",
     "enable_group_red_packet_reply": False,
+    "enable_group_pat_reply": False,
     "allowed_groups": [],
     "unique_session": True,
     "enable_group_summary": False,
@@ -151,6 +152,11 @@ CONFIG_METADATA = {
         "description": "群红包自动暖场",
         "hint": "在允许回复的群中，收到真实微信红包时主动回一句，同群 30 秒最多一次。",
     },
+    "enable_group_pat_reply": {
+        "type": "bool",
+        "description": "群拍一拍回应",
+        "hint": "需 Native 拍一拍补丁；读取之前的群文本、图片或语音，按人格回应，同群 30 秒一次。",
+    },
     "allowed_groups": {
         "type": "list",
         "description": "群白名单",
@@ -191,6 +197,7 @@ class NativeConfig:
     group_reply_mode: str = "mention"
     group_reply_style: str = "mention"
     enable_group_red_packet_reply: bool = False
+    enable_group_pat_reply: bool = False
     allowed_groups: frozenset[str] = frozenset()
     unique_session: bool = True
     enable_group_summary: bool = False
@@ -231,6 +238,7 @@ class NativeConfig:
             "enable_private_reply",
             "enable_media",
             "enable_group_red_packet_reply",
+            "enable_group_pat_reply",
             "unique_session",
             "enable_group_summary",
             "enable_history_tools",
@@ -263,6 +271,7 @@ class NativeConfig:
             group_reply_mode=mode,
             group_reply_style=style,
             enable_group_red_packet_reply=data.get("enable_group_red_packet_reply", False),
+            enable_group_pat_reply=data.get("enable_group_pat_reply", False),
             unique_session=data.get("unique_session", True),
             enable_group_summary=data.get("enable_group_summary", False),
             enable_history_tools=data.get("enable_history_tools", False),

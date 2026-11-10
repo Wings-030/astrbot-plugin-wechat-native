@@ -1,0 +1,226 @@
+--- /dev/null
++++ b/packages/native-client-rust/crates/wechat-core/src/pats.rs
+@@ -0,0 +1,67 @@
++//! Structured pat identities; display templates are never used as identities.
++use serde::{Deserialize, Serialize};
++use ts_rs::TS;
++
++#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS, schemars::JsonSchema)]
++#[serde(rename_all = "camelCase")]
++pub struct PatInfo {
++    /// WeChat username of the member who initiated the pat.
++    pub actor_id: String,
++    /// WeChat username of the member who was patted.
++    pub target_id: String,
++}
++
++pub(crate) fn body(content: &str) -> &str {
++    match content.split_once(":\n") {
++        Some((prefix, rest)) if prefix.len() <= 512 && rest.trim_start().starts_with('<') => rest,
++        _ => content,
++    }
++}
++
++fn identifier(node: roxmltree::Node<'_, '_>, name: &str) -> Option<String> {
++    let value = crate::quotes::leaf(crate::quotes::child(node, name)?)?;
++    if value.is_empty() || value.len() > 512 || value.chars().any(char::is_whitespace)
++        || value.chars().any(char::is_control) || value.ends_with("@chatroom") {
++        return None;
++    }
++    Some(value)
++}
++
++pub(crate) fn parse(kind: i32, content: &str, thread: &str) -> Option<PatInfo> {
++    if !matches!(kind, 49 | 10000 | 10002) || !thread.ends_with("@chatroom")
++        || content.len() > 128 * 1024 {
++        return None;
++    }
++    let doc = roxmltree::Document::parse_with_options(body(content), roxmltree::ParsingOptions {
++        allow_dtd: false, nodes_limit: 256, ..Default::default()
++    }).ok()?;
++    if doc.descendants().any(|n| n.ancestors().take(18).count() > 16
++        || (n.is_element() && n.tag_name().namespace().is_some())
++        || n.attributes().any(|a| a.namespace().is_some())) {
++        return None;
++    }
++    let root = doc.root_element();
++    let pat = if matches!(kind, 10000 | 10002) {
++        if root.tag_name().name() != "sysmsg" || root.attribute("type") != Some("pat") {
++            return None;
++        }
++        let node = crate::quotes::child(root, "pat")?;
++        let chat = crate::quotes::leaf(crate::quotes::child(node, "chatusername")?)?;
++        if chat != thread { return None; }
++        PatInfo { actor_id: identifier(node, "fromusername")?,
++            target_id: identifier(node, "pattedusername")? }
++    } else {
++        let app = if root.tag_name().name() == "appmsg" { root }
++            else if root.tag_name().name() == "msg" { crate::quotes::child(root, "appmsg")? }
++            else { return None; };
++        if crate::quotes::leaf(crate::quotes::child(app, "type")?)? != "62" { return None; }
++        let records = crate::quotes::child(crate::quotes::child(app, "patMsg")?, "records")?;
++        let record = crate::quotes::child(records, "record")?;
++        PatInfo { actor_id: identifier(record, "fromUser")?,
++            target_id: identifier(record, "pattedUser")? }
++    };
++    if let Some((prefix, _)) = content.split_once(":\n") {
++        if prefix != thread && prefix != pat.actor_id { return None; }
++    }
++    Some(pat)
++}
+--- a/packages/native-client-rust/crates/wechat-core/src/lib.rs
++++ b/packages/native-client-rust/crates/wechat-core/src/lib.rs
+@@ -24,6 +24,8 @@
+     PeerApplication, PeerBusinessKind, PeerCategory, PeerClassification, PeerNamespace, PeerOpenIm,
+     PeerWording,
+ };
++mod pats;
++pub use pats::PatInfo;
+ mod profile;
+ mod quote_send;
+ mod quotes;
+--- a/packages/native-client-rust/crates/wechat-core/src/profile.rs
++++ b/packages/native-client-rust/crates/wechat-core/src/profile.rs
+@@ -294,6 +294,8 @@
+     generation: &str,
+ ) -> Result<Value> {
+     let thread = msg.peer.clone();
++    let pat = msg.content.text.as_deref()
++        .and_then(|content| crate::pats::parse(msg.message_type, content, thread.as_deref()?));
+     let system = matches!(msg.message_type, 10000 | 10002);
+     let mut text = if msg.message_type == 1 {
+         msg.content.text.clone()
+@@ -361,14 +363,19 @@
+     // System notices may carry a transport peer in the official row. That
+     // peer is not the author of the notice. Recall normalization separately
+     // restores an original author only when its own evidence establishes one.
+-    let sender = if system { None } else { msg.sender };
+-    let direction = if system {
++    if pat.is_some() { text = Some("[Pat]".into()); }
++    let sender = if let Some(pat) = &pat { Some(pat.actor_id.clone()) }
++        else if system { None } else { msg.sender };
++    let direction = if let Some(pat) = &pat {
++        own.map(|own| if pat.actor_id == own { "outgoing" } else { "incoming" })
++    } else if system {
+         None
+     } else {
+         msg.outgoing
+             .map(|out| if out { "outgoing" } else { "incoming" })
+     };
+     let mut value = json!({"id":message_id(&msg.id)?,"accountId":account,"threadId":thread,"peerId":thread,"serverId":msg.server_message_id,"senderId":sender,"direction":direction,"type":msg.message_type,"appMessageType":app_type,"quote":quote,"link":link,"body":text,"createdAt":created,"mentions":mentions(msg.source.text.as_deref(),own),"media":[],"version":generation,"projection":"official-profile"});
++    if let Some(pat) = pat { value["pat"] = serde_json::to_value(pat)?; }
+     if let Some(location) = location {
+         value["location"] = serde_json::to_value(location)?;
+     }
+--- a/packages/native-client-rust/crates/wechat-core/src/sync_projection.rs
++++ b/packages/native-client-rust/crates/wechat-core/src/sync_projection.rs
+@@ -183,7 +183,13 @@
+     }
+     Ok(())
+ }
++fn parsed_pat(message: &AddMessage) -> Option<crate::PatInfo> {
++    crate::pats::parse(message.message_type, std::str::from_utf8(&message.content).ok()?, &message.peer)
++}
+ fn envelope(message: &AddMessage) -> Result<(String, &[u8])> {
++    if let Some(pat) = parsed_pat(message) {
++        return Ok((pat.actor_id, crate::pats::body(std::str::from_utf8(&message.content)?).as_bytes()));
++    }
+     if message.from.ends_with("@chatroom") && !message.outgoing && message.message_type != 10000 {
+         let end = message
+             .content
+@@ -253,7 +259,8 @@
+     if message.content.len() > 4 * 1024 * 1024 {
+         bail!("message_content_too_large")
+     }
+-    if ![1, 3, 34, 43, 47, 48, 49, 10000].contains(&message.message_type) {
++    if ![1, 3, 34, 43, 47, 48, 49, 10000].contains(&message.message_type)
++        && parsed_pat(&message).is_none() {
+         bail!("unsupported_message_projection_type")
+     }
+     if message.message_type == 48 && crate::locations::parse(std::str::from_utf8(body)?).is_none() {
+@@ -270,7 +277,7 @@
+         ("local_type", local_type as i64),
+         ("sort_seq", sort),
+         ("create_time", message.created_at as i64),
+-        ("status", if message.message_type == 10000 { 4 } else { 3 }),
++        ("status", if matches!(message.message_type, 10000 | 10002) { 4 } else { 3 }),
+         ("upload_status", 0),
+         (
+             "download_status",
+@@ -418,6 +425,14 @@
+         let parsed = if command.id == 5 {
+             let message =
+                 wechat_protocol::wire::decode_add_message(&command.payload, &state.own_username)?;
++            if matches!(message.message_type, 10000 | 10002)
++                || std::str::from_utf8(&message.content).is_ok_and(|s| s.contains("<patMsg")) {
++                let pat = parsed_pat(&message);
++                eprintln!("wechat_pat type={} bytes={} parsed={} actor_self={} target_self={}",
++                    message.message_type, message.content.len(), pat.is_some(),
++                    pat.as_ref().is_some_and(|p| p.actor_id == state.own_username),
++                    pat.as_ref().is_some_and(|p| p.target_id == state.own_username));
++            }
+             if let Some(recall) = crate::recalls::incoming_recall(&message, &state.own_username)? {
+                 self.retain_control_raw(account, command, receipt)?;
+                 self.apply_confirmed_recall_with_notice(
+@@ -507,7 +522,8 @@
+                 self.store.put_runtime(account, receipt, b"1")?;
+                 return Ok(());
+             }
+-            if ![1, 3, 34, 43, 47, 48, 49, 10000].contains(&message.message_type) {
++            if ![1, 3, 34, 43, 47, 48, 49, 10000].contains(&message.message_type)
++        && parsed_pat(&message).is_none() {
+                 let blocked = message_blocker(&message);
+                 if matches!(message.message_type, 51 | 10002) {
+                     self.store.append_event_once(
+--- a/packages/native-client-rust/crates/wechat-api/src/contracts.rs
++++ b/packages/native-client-rust/crates/wechat-api/src/contracts.rs
+@@ -66,6 +66,10 @@
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     #[ts(optional)]
+     pub recall: Option<NativeRecallInfo>,
++    /// Structured identities for a recognized pat. Omitted for other messages.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub pat: Option<wechat_core::PatInfo>,
+     /// `outgoing` when this account sent the message and `incoming` when someone else did. Null for
+     /// system notices and when it cannot be determined.
+     pub direction: Option<String>,
+@@ -714,6 +718,7 @@
+         wechat_core::LocationCoordinateSystem::decl(),
+         wechat_core::LocationCard::decl(),
+         NativeRecallInfo::decl(),
++        wechat_core::PatInfo::decl(),
+         NativeMessage::decl(),
+         wechat_core::PeerCategory::decl(),
+         wechat_core::PeerNamespace::decl(),
+--- a/packages/shared/src/native.generated.ts
++++ b/packages/shared/src/native.generated.ts
+@@ -808,6 +808,15 @@
+  * The notice text WeChat saved in place of the message. Omitted or null when there is none.
+  */
+ replacementText?: string | null, };
++export type PatInfo = {
++/**
++ * WeChat username of the member who initiated the pat.
++ */
++actorId: string,
++/**
++ * WeChat username of the member who was patted.
++ */
++targetId: string, };
+ export type NativeMessage = { 
+ /**
+  * Message ID. Pass it back unchanged to routes that take a message ID.
+@@ -857,7 +866,11 @@
+  * Recall details. Present only when the message was recalled, in which case `body` is
+  * `[Message recalled]`.
+  */
+-recall?: NativeRecallInfo, 
++recall?: NativeRecallInfo,
++/**
++ * Structured identities for a recognized pat. Omitted for other messages.
++ */
++pat?: PatInfo,
+ /**
+  * `outgoing` when this account sent the message and `incoming` when someone else did. Null for
+  * system notices and when it cannot be determined.
