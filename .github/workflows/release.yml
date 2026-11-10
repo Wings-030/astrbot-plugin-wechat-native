@@ -1,0 +1,63 @@
+name: Package and Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build source package
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version: *//p' metadata.yaml | tr -d '\r')
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::metadata.yaml must contain a version such as 0.3.5"
+            exit 1
+          fi
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::Release tag must match metadata.yaml version: v$version"
+            exit 1
+          fi
+          archive="astrbot_plugin_wechat_native-$version.zip"
+          mkdir -p dist
+          git archive --format=zip --prefix=astrbot_plugin_wechat_native/ --output="dist/$archive" HEAD
+          (cd dist && sha256sum "$archive" > "$archive.sha256")
+          echo "name=astrbot_plugin_wechat_native-$version" >> "$GITHUB_OUTPUT"
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/*.zip dist/*.sha256 --clobber
+          else
+            gh release create "$RELEASE_TAG" dist/*.zip dist/*.sha256 \
+              --verify-tag --generate-notes --title "$RELEASE_TAG"
+          fi
