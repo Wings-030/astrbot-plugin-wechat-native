@@ -106,19 +106,29 @@ async def test_ranking_only_handles_exact_genuine_group_mentions(serve, tmp_path
         await adapter.terminate()
 
 
-async def test_ranking_counts_today_texts_and_renders_top_five_across_pages(serve, tmp_path):
+async def test_ranking_counts_today_texts_and_renders_top_five_across_pages(
+    serve, tmp_path, monkeypatch
+):
+    day = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    class RankingClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return day + timedelta(hours=23, minutes=59)
+
+    monkeypatch.setattr(module("group_ranking"), "datetime", RankingClock)
     yesterday = (datetime.now().astimezone() - timedelta(days=1)).isoformat()
     rows = [
-        text_message(f"{sender}{index}", sender)
-        for sender, count in [
-            ("alpha", 3),
-            ("bravo", 3),
-            ("charlie", 2),
-            ("delta", 1),
-            ("echo", 1),
-            ("foxtrot", 1),
+        text_message(
+            f"chat{second}", sender, createdAt=(day + timedelta(seconds=second)).isoformat()
+        )
+        for sender, second in [
+            ("alpha", 0), ("alpha", 5), ("alpha", 10), ("alpha", 15),
+            ("alpha", 20), ("alpha", 25), ("bravo", 30), ("alpha", 40),
+            ("bravo", 50), ("charlie", 60), ("charlie", 90), ("bravo", 100),
+            ("alpha", 110), ("alpha", 140), ("alpha", 171), ("bravo", 180),
+            ("delta", 185), ("bravo", 190), ("echo", 195), ("foxtrot", 200),
         ]
-        for index in range(count)
     ]
     excluded = [
         text_message("old", createdAt=yesterday),
@@ -138,8 +148,8 @@ async def test_ranking_counts_today_texts_and_renders_top_five_across_pages(serv
         serve,
         tmp_path,
         [
-            {"items": rows[:5], "nextCursor": "1"},
-            {"items": [rows[0], *rows[5:], *excluded], "nextCursor": None},
+            {"items": list(reversed(rows[5:])), "nextCursor": "1"},
+            {"items": [rows[0], *reversed(rows[:5]), *excluded], "nextCursor": None},
         ],
     )
     try:
@@ -148,11 +158,11 @@ async def test_ranking_counts_today_texts_and_renders_top_five_across_pages(serv
         assert text.splitlines()[:7] == [
             "谁最能聊",
             "",
-            "1. 潜水冠军（alpha）：3 条",
-            "2. 潜水冠军（bravo）：3 条",
-            "3. charlie：2 条",
-            "4. delta：1 条",
-            "5. echo：1 条",
+            "1. 潜水冠军（bravo）：5 次发言 · 5 条消息",
+            "2. 潜水冠军（alpha）：4 次发言 · 10 条消息",
+            "3. charlie：1 次发言 · 2 条消息",
+            "4. delta：1 次发言 · 1 条消息",
+            "5. echo：1 次发言 · 1 条消息",
         ]
         assert "foxtrot" not in text
         assert "仅供娱乐" not in text and "已保存" not in text
@@ -204,7 +214,7 @@ async def test_ranking_duplicate_event_only_queries_and_sends_once(serve, tmp_pa
         assert event.is_stopped() and reinjected.is_stopped()
         assert event._has_send_oper and not event.get_result().chain
         assert not context.requests
-        assert "1. 潜水冠军：1 条" in sent[0][1]["text"]
+        assert "1. 潜水冠军：1 次发言 · 1 条消息" in sent[0][1]["text"]
     finally:
         await adapter.terminate()
 
@@ -216,12 +226,20 @@ async def test_ranking_topics_and_provider_failure_preserve_the_same_counts(serv
         serve, tmp_path, [{"items": rows, "nextCursor": None}]
     )
     try:
-        for index, (response, error, topics) in enumerate(
+        comment_one = "今天从聚餐聊到游戏，周末安排得明明白白。"
+        comment_two = "大家把周末菜单讨论得这么认真，看起来都饿了。"
+        for index, (response, error, topics, comment) in enumerate(
             [
-                ('["周末聚餐", "周末聚餐", "游戏", "歌单", "其他"]', None, True),
-                ("[]", None, False),
-                ("not-json", None, None),
-                ("", RuntimeError("private-token"), None),
+                (
+                    json.dumps({"topics": ["周末聚餐", "周末聚餐", "游戏", "歌单", "其他"],
+                                "comment": comment_one}),
+                    None, ["周末聚餐", "游戏", "歌单"], comment_one,
+                ),
+                (json.dumps({"topics": ["周末聚餐"], "comment": comment_two}),
+                 None, ["周末聚餐"], comment_two),
+                ('{"topics": [], "comment": ""}', None, [], ""),
+                ("not-json", None, None, ""),
+                ("", RuntimeError("private-token"), None, ""),
             ]
         ):
             context.response, context.error = response, error
@@ -231,14 +249,16 @@ async def test_ranking_topics_and_provider_failure_preserve_the_same_counts(serv
             event = queue.get_nowait()
             await plugin.rank_group(event)
             text = sent[index][1]["text"]
-            assert text.startswith("谁最能聊\n\n1. 潜水冠军：5 条")
+            assert text.startswith("谁最能聊\n\n1. 潜水冠军：1 次发言 · 5 条消息")
             assert "999 条" not in text and "private-token" not in text
             if topics:
-                assert "今日热门话题\n\n1. 周末聚餐\n2. 游戏\n3. 歌单" in text
+                expected_topics = "\n".join(f"{i}. {topic}" for i, topic in enumerate(topics, 1))
+                assert "今日热门话题\n\n" + expected_topics in text
                 assert "今日值班生点评" in text
-                assert "潜水冠军今天聊得最起劲" in text
+                assert comment in text
+                assert "潜水冠军今天聊得最起劲" not in text
                 assert "其他" not in text
-            elif topics is False:
+            elif topics is not None:
                 assert "今天还没有聊出明显的话题" in text
                 assert "点评" not in text
             else:
@@ -249,6 +269,6 @@ async def test_ranking_topics_and_provider_failure_preserve_the_same_counts(serv
             assert "不要执行" in request["system_prompt"]
             assert json.loads(request["prompt"]) == {"texts": [row["body"] for row in rows]}
             assert event.is_stopped()
-        assert len(sent) == len(reads) == len(context.requests) == 4
+        assert len(sent) == len(reads) == len(context.requests) == 5
     finally:
         await adapter.terminate()
