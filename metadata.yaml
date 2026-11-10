@@ -4,14 +4,14 @@ short_desc: 通过 agent-wechat-native 将个人微信接入 AstrBot。
 desc: |
   通过 agent-wechat-native /v1 API 将个人微信接入 AstrBot，无需额外的 Bridge 服务。
 
-  支持文本私聊、群聊 @回复、图片识别与发送、微信语音收发（语音识别使用 AstrBot 配置的 ASR）、PDF 解析、群聊摘要和原生引用回复，并提供白名单、独立会话、断线重连和持久化去重。
+  支持文本私聊、群聊 @回复、当日文本排行与热门话题、图片识别与发送、微信语音收发（语音识别使用 AstrBot 配置的 ASR）、PDF 解析、群聊摘要和原生引用回复，并提供白名单、独立会话、断线重连和持久化去重。
 
   Native v1.5.1 增加当前聊天历史/群资料工具、受权限控制的群昵称/群改名/自身消息撤回，以及默认开启的静默循环熔断；读写工具默认关闭。
 
   群红包自动暖场默认关闭。开启后，收到真实微信红包时可在允许回复的群里自动轮换暖场文案。
 
   需要运行并登录 agent-wechat-native，配置 API 地址、账号 ID 和 Token；图片识别需要支持视觉的模型。文件收发暂不支持。详细配置与使用方法请参阅项目 README。
-version: 0.3.6
+version: 0.3.7
 author: neozhu
 category: utilities
 repo: https://github.com/neozhu/astrbot-plugin-wechat-native

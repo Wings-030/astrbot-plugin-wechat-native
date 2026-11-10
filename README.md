@@ -632,6 +632,6 @@ Loop Breaker 默认开启。每个账号、每个聊天独立统计：60 秒内�
 完成后从该次运行的 Artifacts 下载源码 ZIP 和 SHA-256 校验文件；在分支上手动运行不会发布 Release。
 源码包包含当前提交的 Git 跟踪文件，顶层目录为 `astrbot_plugin_wechat_native/`。
 
-推送与 `metadata.yaml` 版本一致的标签（例如 `v0.3.6`）时，工作流自动创建 GitHub Release
+推送与 `metadata.yaml` 版本一致的标签（例如 `v0.3.7`）时，工作流自动创建 GitHub Release
 并上传同样的两个文件。已有 Release 的附件会保留，重新运行不会覆盖；标签与版本不一致会停止发布。
 自动发布时若版本标签已指向其他提交，也会停止并提示递增版本号，避免复用旧版本。

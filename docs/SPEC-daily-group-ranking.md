@@ -2,7 +2,7 @@
 
 **Project:** `astrbot-plugin-wechat-native`
 
-**Target:** v0.3.6 / agent-wechat-native v1.5.1
+**Target:** v0.3.7 / agent-wechat-native v1.5.1
 
 **Priority:** P2
 
