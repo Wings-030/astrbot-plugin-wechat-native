@@ -14,7 +14,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from urllib.parse import quote, urljoin, urlsplit
 from urllib.request import url2pathname
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import aiohttp
 from aiohttp.http_exceptions import LineTooLong
@@ -764,6 +764,23 @@ class NativeClient:
         except (aiohttp.ClientError, TimeoutError, OSError):
             raise NativeAPIError(0, "timeout") from None
 
+    async def _request_bytes(
+        self, method: str, path: str, *, limit: int = 2 * 1024 * 1024, **kwargs
+    ) -> bytes:
+        if self.closed:
+            raise NativeAPIError(0)
+        try:
+            async with self._session.request(
+                method, self.api_url + path, allow_redirects=False, **kwargs
+            ) as response:
+                await self._raise_for_status(response)
+                data = await response.read()
+        except (aiohttp.ClientError, TimeoutError, OSError):
+            raise NativeAPIError(0, "timeout") from None
+        if len(data) > limit:
+            raise NativeAPIError(0, "media_metadata_limit")
+        return data
+
     async def accounts(self):
         return await self._request("GET", "/accounts")
 
@@ -772,6 +789,27 @@ class NativeClient:
 
     async def account(self):
         return await self._request("GET", self.prefix)
+
+    async def start_login(self, *, timeout_seconds: int = 300) -> dict:
+        return await self._request(
+            "POST",
+            self.prefix + "/auth/login",
+            json={
+                "strategy": "qr",
+                "qrRefresh": {"mode": "manual", "maxRefreshes": 3},
+                "allowQr": True,
+                "timeoutSeconds": timeout_seconds,
+                "computerName": "astrbot",
+            },
+            headers={"Idempotency-Key": uuid4().hex},
+        )
+
+    async def operation_qr(self, operation_id: str, generation: int) -> bytes:
+        return await self._request_bytes(
+            "GET",
+            self.prefix + "/operations/" + quote(operation_id, safe="") + "/qr",
+            params={"generation": str(generation)},
+        )
 
     async def message(self, message_id: str):
         return await self._request("GET", self.prefix + "/messages/" + quote(message_id, safe=""))

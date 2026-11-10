@@ -48,6 +48,20 @@ DEFAULT_CONFIG = {
     "admin_token_file": "/run/secrets/wechat-admin-token",
     "summary_max_messages": 200,
     "summary_window_minutes": 60,
+    "enable_offline_notify": False,
+    "offline_notify_umo": "",
+    "offline_notify_after_seconds": 60,
+    "offline_notify_repeat_hours": 6,
+    "offline_notify_on_recovery": True,
+    "enable_login_qr": False,
+    "enable_email_notify": False,
+    "email_smtp_host": "",
+    "email_smtp_port": 465,
+    "email_smtp_security": "ssl",
+    "email_smtp_user": "",
+    "email_smtp_password": "",
+    "email_from": "",
+    "email_to": "",
 }
 
 CONFIG_METADATA = {
@@ -176,6 +190,90 @@ CONFIG_METADATA = {
         "description": "摘要消息时间范围（分钟）",
         "hint": "1–1440，默认 60；只包含开启功能后收到的实时文本",
     },
+    "enable_offline_notify": {
+        "type": "bool",
+        "description": "掉线提醒",
+        "hint": (
+            "个人微信掉线或 Native 接口不可达时，通过本机已启用的 weixin_oc 机器人私聊提醒；"
+            "恢复在线时也会通知。通知对象自动发现，无需填写用户 ID。"
+        ),
+    },
+    "offline_notify_umo": {
+        "type": "string",
+        "description": "提醒发送目标（留空自动发现）",
+        "hint": (
+            "格式如 weixin_personal_wpic:FriendMessage:用户ID；"
+            "留空时自动使用最近联系的 weixin_oc 机器人会话。"
+        ),
+    },
+    "offline_notify_after_seconds": {
+        "type": "int",
+        "description": "持续掉线多久才提醒（秒）",
+        "hint": "10–3600，默认 60；连续检测失败达到该时长才发送，避免网络抖动误报",
+    },
+    "offline_notify_repeat_hours": {
+        "type": "int",
+        "description": "持续掉线的补提醒间隔（小时）",
+        "hint": "0–168，默认 6；填 0 表示掉线期间只提醒一次",
+    },
+    "offline_notify_on_recovery": {
+        "type": "bool",
+        "description": "恢复在线时提醒",
+        "hint": "关闭后只在掉线时发送提醒",
+    },
+    "enable_login_qr": {
+        "type": "bool",
+        "description": "掉线时自动发送登录二维码",
+        "hint": (
+            "判定掉线后通过已配置的 weixin_oc 目标发送微信登录二维码，直接用手机扫码即可；"
+            "二维码约 4 分钟过期，过期后在聊天里发送“微信二维码”可重新获取。"
+        ),
+    },
+    "enable_email_notify": {
+        "type": "bool",
+        "description": "邮件提醒",
+        "hint": (
+            "掉线时额外发送邮件，与微信提醒互不影响：两个都开就同时发，一个失败不影响另一个。"
+            "邮件通道没有会话窗口限制。"
+        ),
+    },
+    "email_smtp_host": {
+        "type": "string",
+        "description": "SMTP 服务器地址",
+        "hint": "例如 smtp.qq.com、smtp.163.com、smtp.gmail.com",
+    },
+    "email_smtp_port": {
+        "type": "int",
+        "description": "SMTP 端口",
+        "hint": "SSL 通常 465，STARTTLS 通常 587",
+    },
+    "email_smtp_security": {
+        "type": "string",
+        "description": "SMTP 加密方式",
+        "options": ["ssl", "starttls", "none"],
+        "labels": ["SSL", "STARTTLS", "不加密"],
+        "hint": "按邮箱服务商要求选择；一般选 SSL",
+    },
+    "email_smtp_user": {
+        "type": "string",
+        "description": "SMTP 登录账号",
+        "hint": "通常是完整邮箱地址，例如 you@qq.com",
+    },
+    "email_smtp_password": {
+        "type": "string",
+        "description": "SMTP 授权码",
+        "secret": True,
+        "hint": "不是邮箱登录密码；QQ/163 需要在网页版开启 SMTP 服务后生成授权码",
+    },
+    "email_from": {
+        "type": "string",
+        "description": "发件人地址（留空使用 SMTP 账号）",
+    },
+    "email_to": {
+        "type": "string",
+        "description": "收件人地址",
+        "hint": "可以填自己的邮箱；多人用英文逗号分隔",
+    },
 }
 
 
@@ -200,6 +298,20 @@ class NativeConfig:
     admin_token_file: str = field(default="", repr=False)
     summary_max_messages: int = 200
     summary_window_minutes: int = 60
+    enable_offline_notify: bool = False
+    offline_notify_umo: str = ""
+    offline_notify_after_seconds: int = 60
+    offline_notify_repeat_hours: int = 6
+    offline_notify_on_recovery: bool = True
+    enable_login_qr: bool = False
+    enable_email_notify: bool = False
+    email_smtp_host: str = ""
+    email_smtp_port: int = 465
+    email_smtp_security: str = "ssl"
+    email_smtp_user: str = ""
+    email_smtp_password: str = field(default="", repr=False)
+    email_from: str = ""
+    email_to: str = ""
 
     @classmethod
     def from_dict(cls, data: dict) -> "NativeConfig":
@@ -235,6 +347,10 @@ class NativeConfig:
             "enable_group_summary",
             "enable_history_tools",
             "enable_wechat_actions",
+            "enable_offline_notify",
+            "offline_notify_on_recovery",
+            "enable_email_notify",
+            "enable_login_qr",
         ):
             if key in data and not isinstance(data[key], bool):
                 raise ValueError(f"{key} 必须是布尔值")
@@ -245,6 +361,30 @@ class NativeConfig:
             value = data.get(key, default)
             if type(value) is not int or not 1 <= value <= maximum:
                 raise ValueError(f"{key} 必须是 1–{maximum} 的整数")
+        after_seconds = data.get("offline_notify_after_seconds", 60)
+        if type(after_seconds) is not int or not 10 <= after_seconds <= 3600:
+            raise ValueError("offline_notify_after_seconds 必须是 10–3600 的整数")
+        repeat_hours = data.get("offline_notify_repeat_hours", 6)
+        if type(repeat_hours) is not int or not 0 <= repeat_hours <= 168:
+            raise ValueError("offline_notify_repeat_hours 必须是 0–168 的整数")
+        notify_umo = data.get("offline_notify_umo", "")
+        if not isinstance(notify_umo, str):
+            raise ValueError("offline_notify_umo 必须是字符串")
+        email_port = data.get("email_smtp_port", 465)
+        if type(email_port) is not int or not 1 <= email_port <= 65535:
+            raise ValueError("email_smtp_port 必须是 1–65535 的整数")
+        email_security = data.get("email_smtp_security", "ssl")
+        if email_security not in {"ssl", "starttls", "none"}:
+            raise ValueError("email_smtp_security 必须为 ssl/starttls/none")
+        for key in (
+            "email_smtp_host",
+            "email_smtp_user",
+            "email_smtp_password",
+            "email_from",
+            "email_to",
+        ):
+            if not isinstance(data.get(key, ""), str):
+                raise ValueError(f"{key} 必须是字符串")
         lists = {}
         for key in ("allowed_users", "allowed_groups", "wechat_action_admins"):
             value = data.get(key, [])
@@ -270,6 +410,20 @@ class NativeConfig:
             admin_token_file=data.get("admin_token_file", ""),
             summary_max_messages=data.get("summary_max_messages", 200),
             summary_window_minutes=data.get("summary_window_minutes", 60),
+            enable_offline_notify=data.get("enable_offline_notify", False),
+            offline_notify_umo=notify_umo.strip(),
+            offline_notify_after_seconds=after_seconds,
+            offline_notify_repeat_hours=repeat_hours,
+            offline_notify_on_recovery=data.get("offline_notify_on_recovery", True),
+            enable_login_qr=data.get("enable_login_qr", False),
+            enable_email_notify=data.get("enable_email_notify", False),
+            email_smtp_host=data.get("email_smtp_host", "").strip(),
+            email_smtp_port=email_port,
+            email_smtp_security=email_security,
+            email_smtp_user=data.get("email_smtp_user", "").strip(),
+            email_smtp_password=data.get("email_smtp_password", ""),
+            email_from=data.get("email_from", "").strip(),
+            email_to=data.get("email_to", "").strip(),
             **lists,
         )
 

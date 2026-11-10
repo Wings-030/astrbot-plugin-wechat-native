@@ -224,6 +224,48 @@ URL 音频复用图片的公网 HTTP(S)、80/443 端口、DNS/SSRF 校验和最�
 同群一次只生成一个摘要，60 秒超时会提示重试；无缓存或模型不可用时返回提示。
 生成或发送前发现来源记录撤回、过期或被淘汰，会取消旧摘要，需重新触发。
 
+### 掉线提醒
+
+在 WeChat Native **机器人参数**中开启 `enable_offline_notify`（微信提醒）或
+`enable_email_notify`（邮件提醒），可同时开启。插件每 30 秒检查一次账号状态，
+持续掉线超过 `offline_notify_after_seconds` 后，按已开启的通道分别发送；两个通道互不影响，
+一个失败不会阻止另一个。恢复在线时也会通知。
+
+微信提醒通过本机已启用的 `weixin_oc` 机器人发送，个人微信和官方 AI 机器人是两条独立通道，
+前者掉线不影响后者发消息。邮件提醒直接用 SMTP 发出，没有会话窗口限制，适合不常跟官方机器人互动的情况。
+
+| 字段 | 默认值 | 说明 |
+| --- | --- | --- |
+| `enable_offline_notify` | `false` | 微信提醒开关 |
+| `offline_notify_umo` | 空（自动发现） | 微信提醒目标，格式 `平台ID:FriendMessage:用户ID` |
+| `offline_notify_after_seconds` | `60` | 连续掉线达到该时长才提醒，范围 10–3600 |
+| `offline_notify_repeat_hours` | `6` | 持续掉线的补提醒间隔，范围 0–168；`0` 表示只提醒一次 |
+| `offline_notify_on_recovery` | `true` | 恢复在线时是否也提醒 |
+| `enable_login_qr` | `false` | 掉线时自动发送登录二维码 |
+| `enable_email_notify` | `false` | 邮件提醒开关 |
+| `email_smtp_host` | 空 | SMTP 服务器，如 `smtp.qq.com`、`smtp.163.com` |
+| `email_smtp_port` | `465` | SMTP 端口，SSL 用 465，STARTTLS 用 587 |
+| `email_smtp_security` | `ssl` | `ssl` / `starttls` / `none` |
+| `email_smtp_user` | 空 | SMTP 登录账号，通常是完整邮箱地址 |
+| `email_smtp_password` | 空 | SMTP 授权码（不是登录密码），需在邮箱设置里开启 SMTP 后生成 |
+| `email_from` | 空 | 发件人地址，留空使用 SMTP 账号 |
+| `email_to` | 空 | 收件人地址，多人用英文逗号分隔 |
+
+开启 `enable_login_qr` 后，判定掉线时还会自动生成登录二维码并通过微信通道发出，
+直接用手机扫码即可重新登录，不需要 SSH 到服务器。二维码约 **4 分钟**过期，
+过期后在聊天里发送 `微信二维码` 可重新获取一张（只在该指令来源为 `weixin_oc` 私聊时响应，避免二维码外泄）。
+二维码通过 Native 的 `/auth/login` 与 `/operations/{id}/qr` HTTP 接口获取，不依赖 Docker 或命令行。
+
+微信通道依赖微信下发的 `context_token`，实测超过约 33 小时没跟官方 AI 机器人互动就会失效
+（发送返回 `prepare failed`），给机器人发一句话即可恢复；这正是建议同时开启邮件通道的原因。
+
+留空 `offline_notify_umo` 时会自动在已启用的 `weixin_oc` 平台中查找会话：只有一个候选就直接使用，
+多个候选则选择最近互动的会话；无法判断时不会乱发，等待你给机器人发一条消息后自动记住。
+
+账号在线时也可以手动发送 `微信二维码` 获取一张新二维码用于测试或重新登录，
+扫码才会真正重新登录，不扫描则不影响当前会话。插件只负责发送二维码，
+扫码后的确认仍需在手机微信中完成。
+
 ### 消息引用回复
 
 在机器人使用的 **AstrBot 配置文件**中开启 `platform_settings.reply_with_quote`（引用回复），
