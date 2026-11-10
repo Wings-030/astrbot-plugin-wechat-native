@@ -165,6 +165,7 @@ class WeChatNativePlugin(Star):
             TextPart(text=pdf_context_text(str(pdf.get("name") or "未命名.pdf"), pdf["text"]))
         )
 
+    @filter.command("谁最能聊")
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=100)
     async def rank_group(self, event: AstrMessageEvent):
         """真正 @当前机器人发送“谁最能聊”，统计当天群文本。"""

@@ -47,17 +47,34 @@ async def ranking_session(serve, tmp_path, pages, **options):
     return adapter, queue, msg, sent, reads, plugin, context
 
 
-async def test_ranking_only_handles_exact_genuine_group_mentions(serve, tmp_path):
+async def test_ranking_only_handles_exact_genuine_group_mentions(serve, tmp_path, monkeypatch):
     adapter, queue, msg, sent, reads, plugin, context = await ranking_session(
         serve, tmp_path, [{"items": [], "nextCursor": None}]
     )
     try:
         event = queue.get_nowait()
+        from astrbot.core.star import command_management
+        from astrbot.core.star.filter.command import CommandFilter
         from astrbot.core.star.filter.event_message_type import EventMessageTypeFilter
         from astrbot.core.star.star_handler import star_handlers_registry
 
         registered = [h for h in star_handlers_registry if h.handler_name == "rank_group"][-1]
         assert any(isinstance(f, EventMessageTypeFilter) for f in registered.event_filters)
+
+        async def no_command_overrides():
+            return []
+
+        monkeypatch.setattr(
+            command_management.db_helper, "get_command_configs", no_command_overrides
+        )
+        commands = await command_management.list_commands()
+        listed = [c for c in commands if c["handler_full_name"] == registered.handler_full_name]
+        assert len(listed) == 1
+        assert listed[0]["effective_command"] == "谁最能聊"
+        assert listed[0]["type"] == "command"
+        command = next(f for f in registered.event_filters if isinstance(f, CommandFilter))
+        event.is_at_or_wake_command = True
+        assert command.filter(event, {})
         for index, (body, thread, mentioned) in enumerate(
             [
                 ("谁最能聊", "peer", True),
