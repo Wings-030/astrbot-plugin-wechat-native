@@ -797,6 +797,14 @@ class NativeClient:
             "GET", self.prefix + "/groups/" + quote(thread, safe="") + "/members", params=params
         )
 
+    async def group_member(self, thread: str, username: str):
+        return await self._request(
+            "GET",
+            self.prefix
+            + "/groups/" + quote(thread, safe="")
+            + "/members/" + quote(username, safe=""),
+        )
+
     async def set_my_group_name(self, thread: str, name: str, key: str):
         return await self._request(
             "PUT",
