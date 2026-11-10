@@ -253,9 +253,11 @@ async def test_ranking_topics_and_provider_failure_preserve_the_same_counts(serv
             assert "999 条" not in text and "private-token" not in text
             if topics:
                 expected_topics = "\n".join(f"{i}. {topic}" for i, topic in enumerate(topics, 1))
-                assert "今日热门话题\n\n" + expected_topics in text
-                assert "今日值班生点评" in text
-                assert comment in text
+                assert text == (
+                    "谁最能聊\n\n1. 潜水冠军：1 次发言 · 5 条消息"
+                    f"\n\n今日热门话题\n\n{expected_topics}"
+                    f"\n\n今日值班生点评\n\n{comment}"
+                )
                 assert "潜水冠军今天聊得最起劲" not in text
                 assert "其他" not in text
             elif topics is not None:
