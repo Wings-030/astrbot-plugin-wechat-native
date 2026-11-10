@@ -1131,6 +1131,7 @@ class WeChatNativeAdapter(Platform):
                 if (
                     source
                     and not red_packet
+                    and not (event and event.get_extra("wechat_native_plain_reply"))
                     and thread.endswith("@chatroom")
                     and has_text
                     and self.native_config.group_reply_style == "quote"
@@ -1161,6 +1162,7 @@ class WeChatNativeAdapter(Platform):
                         return False
                     if (
                         not red_packet
+                        and not (event and event.get_extra("wechat_native_plain_reply"))
                         and thread.endswith("@chatroom")
                         and self.native_config.group_reply_style == "mention"
                         and mentions is None

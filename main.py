@@ -2,7 +2,7 @@
 
 import asyncio
 
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star
 from astrbot.core.agent.message import TextPart
@@ -11,9 +11,12 @@ from .adapter import WeChatNativeAdapter  # noqa: F401
 from .config import PLUGIN_ID
 from .connection_view import ConnectionView
 from .event import PDF_CONTEXT_MARKER, WeChatNativeEvent, pdf_context_text
+from .group_ranking import collect_ranking, format_ranking, is_ranking_command
 from .history_tools import run_read
 from .mention_tools import run_mention
 from .summary import SUMMARY_SYSTEM_PROMPT, summary_prompt
+from .tool_support import ToolError
+from .tool_support import context as tool_context
 from .wechat_actions import run_action
 
 
@@ -126,6 +129,7 @@ class WeChatNativePlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
         self._summary_running = set()
+        self._ranking_running = set()
         view = ConnectionView(context)
         context.register_web_api(
             f"/{PLUGIN_ID}/connection/bots", view.bots, ["GET"], "列出微信机器人"
@@ -153,6 +157,49 @@ class WeChatNativePlugin(Star):
         req.extra_user_content_parts.append(
             TextPart(text=pdf_context_text(str(pdf.get("name") or "未命名.pdf"), pdf["text"]))
         )
+
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=100)
+    async def rank_group(self, event: AstrMessageEvent):
+        """真正 @当前机器人发送“谁最能聊”，统计当天群文本。"""
+        if not isinstance(event, WeChatNativeEvent) or not event.get_group_id():
+            return
+        raw = event.message_obj.raw_message
+        if not isinstance(raw, dict) or not is_ranking_command(raw):
+            return
+        if event.get_extra("wechat_native_ranking_started"):
+            return
+        adapter, key = event.adapter, (event.adapter, event.message_obj.message_id)
+        task = asyncio.current_task()
+        started = False
+        try:
+            ctx = tool_context(event, group=True, send=True)
+            if (
+                key in self._ranking_running
+                or adapter.state.message_status(ctx.message_id) != "queued"
+            ):
+                return
+            event.set_extra("wechat_native_ranking_started", True)
+            self._ranking_running.add(key)
+            adapter._send_tasks.add(task)
+            started = True
+            ranking = await collect_ranking(ctx)
+            tool_context(event, group=True, send=True)
+            event.set_extra("wechat_native_plain_reply", True)
+            await event.send(MessageChain().message(format_ranking(ranking)))
+        except ToolError:
+            pass
+        except Exception as error:
+            self.logger.warning("群聊排行榜处理失败：type=%s", type(error).__name__)
+        finally:
+            if started:
+                self._ranking_running.discard(key)
+                adapter._send_tasks.discard(task)
+                if (
+                    not adapter._state_closed
+                    and adapter.state.message_status(raw["id"]) == "queued"
+                ):
+                    adapter.state.mark_message(raw["id"], "no_reply")
+            event.stop_event()
 
     @filter.command("总结群聊", alias={"群聊摘要"})
     async def summarize_group(self, event: AstrMessageEvent):
