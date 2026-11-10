@@ -1,8 +1,11 @@
 # SPEC — 谁最能聊
 
-**Project:** `astrbot-plugin-wechat-native`  
-**Target:** v0.3.6 / agent-wechat-native v1.5.1  
-**Priority:** P2  
+**Project:** `astrbot-plugin-wechat-native`
+
+**Target:** v0.3.6 / agent-wechat-native v1.5.1
+
+**Priority:** P2
+
 **Type:** Group Command
 
 ## 1. 目标
