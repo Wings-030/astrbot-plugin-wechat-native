@@ -71,8 +71,18 @@ def test_cache_expires_records_and_bounds_all_groups_and_prompt(monkeypatch):
     now = time.time()
     monkeypatch.setattr(summary.time, "time", lambda: now)
     cache = summary.GroupSummaryCache(500, 60)
+    # message() uses datetime.now(), which is not frozen by the time.time patch.
+    # Use the cache's clock so slow CI cannot create newer, unexpired records.
+    created_at = datetime.fromtimestamp(now, UTC).isoformat()
     for i in range(2100):
-        cache.add(message(id=f"m{i}", threadId=f"room{i % 5}@chatroom", body="长消息" * 1000))
+        cache.add(
+            message(
+                id=f"m{i}",
+                threadId=f"room{i % 5}@chatroom",
+                body="长消息" * 1000,
+                createdAt=created_at,
+            )
+        )
     records = tuple(record for i in range(5) for record in cache.snapshot(f"room{i}@chatroom"))
     assert len(records) == 2000
     assert all(len(record.text) <= 1000 for record in records)
