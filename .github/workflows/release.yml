@@ -2,6 +2,10 @@ name: Package and Release
 
 on:
   push:
+    branches:
+      - main
+    paths:
+      - metadata.yaml
     tags:
       - 'v[0-9]*'
   workflow_dispatch:
@@ -19,7 +23,48 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check version change
+        id: version
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version: *//p' metadata.yaml | tr -d '\r')
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::metadata.yaml must contain a version such as 0.3.6"
+            exit 1
+          fi
+          build=true
+          publish=false
+          if [[ "$REF_TYPE" == "tag" ]]; then
+            if [[ "$REF_NAME" != "v$version" ]]; then
+              echo "::error::Release tag must match metadata.yaml version: v$version"
+              exit 1
+            fi
+            publish=true
+          elif [[ "$EVENT_NAME" == "push" ]]; then
+            previous=""
+            if [[ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]]; then
+              previous=$(git show "$BEFORE_SHA:metadata.yaml" | sed -n 's/^version: *//p' | tr -d '\r')
+            fi
+            if [[ "$version" == "$previous" ]]; then
+              build=false
+              echo "Version unchanged ($version); skipping packaging and release."
+            else
+              publish=true
+            fi
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
       - name: Build source package
+        if: steps.version.outputs.build == 'true'
         id: package
         shell: bash
         run: |
@@ -40,6 +85,7 @@ jobs:
           echo "name=astrbot_plugin_wechat_native-$version" >> "$GITHUB_OUTPUT"
 
       - name: Upload package artifact
+        if: steps.version.outputs.build == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.package.outputs.name }}
@@ -49,15 +95,25 @@ jobs:
           if-no-files-found: error
 
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: steps.version.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: v${{ steps.version.outputs.version }}
+          RELEASE_SHA: ${{ github.sha }}
+          REF_TYPE: ${{ github.ref_type }}
         run: |
+          set -euo pipefail
+          if [[ "$REF_TYPE" != "tag" ]] && git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            tag_sha=$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")
+            if [[ "$tag_sha" != "$RELEASE_SHA" ]]; then
+              echo "::error::Version tag $RELEASE_TAG already points to another commit; bump metadata.yaml version."
+              exit 1
+            fi
+          fi
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" dist/*.zip dist/*.sha256 --clobber
+            echo "Release $RELEASE_TAG already exists; keeping its published assets."
           else
             gh release create "$RELEASE_TAG" dist/*.zip dist/*.sha256 \
-              --verify-tag --generate-notes --title "$RELEASE_TAG"
+              --target "$RELEASE_SHA" --generate-notes --title "$RELEASE_TAG"
           fi
