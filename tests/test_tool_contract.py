@@ -14,10 +14,11 @@ TOOLS = {
     "wechat_set_my_group_nickname": {"nickname"},
     "wechat_rename_group": {"name"},
     "wechat_recall_own_message": {"message_id"},
+    "wechat_mention_member": {"username", "text"},
 }
 
 
-def test_real_astrbot_registry_exposes_exactly_seven_scoped_tools():
+def test_real_astrbot_registry_exposes_scoped_tools():
     plugin = module("main").WeChatNativePlugin
     from astrbot.core.provider.register import llm_tools
 

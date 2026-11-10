@@ -144,7 +144,7 @@ def _is_owned_reloaded_native_event(event, adapter, adapter_type):
     )
 
 
-def context(event, *, write=False, group=False):
+def context(event, *, write=False, group=False, send=False):
     from .adapter import WeChatNativeAdapter
 
     adapter = getattr(event, "adapter", None)
@@ -170,7 +170,7 @@ def context(event, *, write=False, group=False):
         raise ToolError("not_available", "adapter_stopped")
     if adapter.client.closed:
         raise ToolError("not_available", "native_client_closed")
-    if not enabled:
+    if not send and not enabled:
         raise ToolError(
             "not_available", "wechat_actions_disabled" if write else "history_tools_disabled"
         )
