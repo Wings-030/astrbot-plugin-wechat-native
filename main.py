@@ -11,7 +11,14 @@ from .adapter import WeChatNativeAdapter  # noqa: F401
 from .config import PLUGIN_ID
 from .connection_view import ConnectionView
 from .event import PDF_CONTEXT_MARKER, WeChatNativeEvent, pdf_context_text
-from .group_ranking import collect_ranking, format_ranking, is_ranking_command
+from .group_ranking import (
+    TOPICS_SYSTEM_PROMPT,
+    collect_ranking,
+    format_ranking,
+    is_ranking_command,
+    parse_topics,
+    topics_prompt,
+)
 from .history_tools import run_read
 from .mention_tools import run_mention
 from .summary import SUMMARY_SYSTEM_PROMPT, summary_prompt
@@ -183,9 +190,10 @@ class WeChatNativePlugin(Star):
             adapter._send_tasks.add(task)
             started = True
             ranking = await collect_ranking(ctx)
+            topics = await self._ranking_topics(event, ranking)
             tool_context(event, group=True, send=True)
             event.set_extra("wechat_native_plain_reply", True)
-            await event.send(MessageChain().message(format_ranking(ranking)))
+            await event.send(MessageChain().message(format_ranking(ranking, topics)))
         except ToolError:
             pass
         except Exception as error:
@@ -200,6 +208,26 @@ class WeChatNativePlugin(Star):
                 ):
                     adapter.state.mark_message(raw["id"], "no_reply")
             event.stop_event()
+
+    async def _ranking_topics(self, event, ranking):
+        if ranking is None or not ranking.leaders:
+            return None
+        if len(ranking.texts) < 5:
+            return []
+        try:
+            async with asyncio.timeout(8):
+                provider_id = await self.context.get_current_chat_provider_id(
+                    event.unified_msg_origin
+                )
+                response = await self.context.llm_generate(
+                    chat_provider_id=provider_id,
+                    prompt=topics_prompt(ranking.texts),
+                    system_prompt=TOPICS_SYSTEM_PROMPT,
+                )
+            return parse_topics(response.completion_text)
+        except Exception as error:
+            self.logger.warning("群聊排行话题分析失败：type=%s", type(error).__name__)
+            return None
 
     @filter.command("总结群聊", alias={"群聊摘要"})
     async def summarize_group(self, event: AstrMessageEvent):
