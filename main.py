@@ -22,7 +22,7 @@ from .group_ranking import (
 from .history_tools import run_read
 from .mention_tools import run_mention
 from .summary import SUMMARY_SYSTEM_PROMPT, summary_prompt
-from .tool_support import ToolError
+from .tool_support import ToolError, is_native_event
 from .tool_support import context as tool_context
 from .wechat_actions import run_action
 
@@ -169,7 +169,7 @@ class WeChatNativePlugin(Star):
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=100)
     async def rank_group(self, event: AstrMessageEvent):
         """真正 @当前机器人发送“谁最能聊”，统计当天群文本。"""
-        if not isinstance(event, WeChatNativeEvent) or not event.get_group_id():
+        if not is_native_event(event) or not event.get_group_id():
             return
         raw = event.message_obj.raw_message
         if not isinstance(raw, dict) or not is_ranking_command(raw):
@@ -190,6 +190,7 @@ class WeChatNativePlugin(Star):
             self._ranking_running.add(key)
             adapter._send_tasks.add(task)
             started = True
+            self.logger.info("群聊排行榜开始统计：message=%s", ctx.message_id)
             ranking = await collect_ranking(ctx)
             analysis = await self._ranking_analysis(event, ranking)
             tool_context(event, group=True, send=True)

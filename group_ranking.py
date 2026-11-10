@@ -206,6 +206,8 @@ def format_ranking(ranking, analysis=None):
         f"{index}. {ranking.names[sender]}：{turns} 次发言 · {messages} 条消息"
         for index, (sender, turns, messages) in enumerate(ranking.leaders, 1)
     )
+    if ranking.partial:
+        lines.extend(["", "本次为部分统计。"])
     if analysis is not None:
         topics, comment = analysis
         lines.extend(["", "今日热门话题", ""])
@@ -215,6 +217,4 @@ def format_ranking(ranking, analysis=None):
                 lines.extend(["", ranking.bot_name + "点评", "", comment])
         else:
             lines.append("今天还没有聊出明显的话题")
-    if ranking.partial:
-        lines.extend(["", "本次为部分统计。"])
     return "\n".join(lines)

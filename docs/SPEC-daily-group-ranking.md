@@ -2,7 +2,7 @@
 
 **Project:** `astrbot-plugin-wechat-native`
 
-**Target:** v0.3.9 / agent-wechat-native v1.5.1
+**Target:** v0.3.10 / agent-wechat-native v1.5.1
 
 **Priority:** P2
 
@@ -146,7 +146,7 @@
 今天从聚餐聊到游戏，周末的饭搭子和队友都快凑齐了。
 ```
 
-达到查询上限或中途查询失败时，仅在末尾补充：
+达到查询上限或中途查询失败时，在排名之后、话题之前补充提示，点评仍放在最后：
 
 > 本次为部分统计。
 

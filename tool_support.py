@@ -144,16 +144,19 @@ def _is_owned_reloaded_native_event(event, adapter, adapter_type):
     )
 
 
-def context(event, *, write=False, group=False, send=False):
+def is_native_event(event):
     from .adapter import WeChatNativeAdapter
 
     adapter = getattr(event, "adapter", None)
-    event_match = isinstance(event, WeChatNativeEvent)
-    adapter_match = isinstance(adapter, WeChatNativeAdapter)
-    if not (event_match and adapter_match) and not _is_owned_reloaded_native_event(
-        event, adapter, WeChatNativeAdapter
-    ):
-        if not event_match:
+    return (
+        isinstance(event, WeChatNativeEvent) and isinstance(adapter, WeChatNativeAdapter)
+    ) or _is_owned_reloaded_native_event(event, adapter, WeChatNativeAdapter)
+
+
+def context(event, *, write=False, group=False, send=False):
+    adapter = getattr(event, "adapter", None)
+    if not is_native_event(event):
+        if not isinstance(event, WeChatNativeEvent):
             logger.warning(
                 "WeChat Native 工具事件类型：actual=%s.%s expected=%s.%s",
                 type(event).__module__,
