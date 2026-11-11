@@ -11,14 +11,14 @@
 
 ### 消息接入与智能回复
 
-![消息能力图：文本、图片、PDF 和微信语音经 Native 与插件交给 AstrBot，生成文本、图片或原生语音回复](docs/wechat-native-messages.png)
+![消息能力图：文本、图片、PDF 和微信语音经 Native 与插件交给 AstrBot，生成文本、图片或原生语音回复](https://github.com/neozhu/astrbot-plugin-wechat-native/blob/main/docs/wechat-native-messages.png?raw=true)
 
 图片识别需视觉模型；语音识别与合成需分别配置 STT、TTS。支持 AstrBot 文本转图片，普通文件发送暂不支持。
 查看[图片发送](docs/features.md#支持发送图片)、[媒体读取指令](docs/features.md#图片识别)、[语音收发](docs/features.md#微信语音收发)与[引用回复](docs/features.md#消息引用回复)。
 
 ### 群聊协作与运行保障
 
-![群聊能力图：摘要与排行、当前聊天工具、管理权限，以及白名单、会话隔离、熔断、回执和可视化面板](docs/wechat-native-capabilities.png)
+![群聊能力图：摘要与排行、当前聊天工具、管理权限，以及白名单、会话隔离、熔断、回执和可视化面板](https://github.com/neozhu/astrbot-plugin-wechat-native/blob/main/docs/wechat-native-capabilities.png?raw=true)
 
 群内默认需**真正 @机器人**；摘要、历史工具和微信修改工具需要单独开启。
 查看[谁最能聊](docs/features.md#谁最能聊)、[群聊摘要](docs/features.md#群聊摘要)、[聊天工具及权限](docs/features.md#当前聊天工具native-v151)与[循环保护](docs/features.md#自动回复循环保护)。
@@ -35,7 +35,7 @@
 
 参数配置示例（Account ID 和开关以实际使用为准）：
 
-![WeChat Native 机器人参数配置](docs/wechat-nactive.png)
+![WeChat Native 机器人参数配置](https://github.com/neozhu/astrbot-plugin-wechat-native/blob/main/docs/wechat-nactive.png?raw=true)
 
 ### 连接信息
 
@@ -386,7 +386,7 @@ docker compose exec -T astrbot python -c \
 
 面板预览（以下为示例数据）：
 
-![WeChat Native 面板：连接状态、消息统计与最近 7 天趋势](docs/wechat-native-panel.png)
+![WeChat Native 面板：连接状态、消息统计与最近 7 天趋势](https://github.com/neozhu/astrbot-plugin-wechat-native/blob/main/docs/wechat-native-panel.png?raw=true)
 
 排查网络时，可从 AstrBot 容器执行只读检查，不输出 Token：
 
