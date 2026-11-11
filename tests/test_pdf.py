@@ -8,7 +8,7 @@ import pytest
 from aiohttp import web
 from conftest import module
 from test_adapter import make_adapter, message, native_event, no_telemetry  # noqa: F401
-from test_native_client import client
+from test_native_client import VALID_JPEG, client, media_asset
 
 UNIQUE = "QUOKKA-ZEBRA-7319-LANTERN"
 
@@ -717,7 +717,7 @@ async def test_quoted_pdf_recall_suppresses_the_reply(serve, tmp_path, when):
 # ------------------------------------------------------------ group recent
 
 
-def group_request(body="@机器人\u2005总结一下这个PDF", **updates):
+def group_request(body="@机器人\u2005读取文档", **updates):
     return message(
         id="request-1",
         serverId="802",
@@ -732,9 +732,11 @@ def group_request(body="@机器人\u2005总结一下这个PDF", **updates):
 @pytest.mark.parametrize(
     "body,prompt",
     [
-        ("@机器人\u2005总结一下这个PDF", "总结一下这个PDF"),
-        ("@机器人\u2005这份文件的结论是什么", "这份文件的结论是什么"),
-        ("@机器人\u2005", "请阅读并总结这份 PDF 文件的主要内容。"),
+        ("@机器人\u2005读取文档", "读取文档"),
+        ("@机器人\u2005读取PDF", "读取PDF"),
+        ("@机器人\u2005读取pdf", "读取pdf"),
+        ("@机器人\u2005读取附件", "读取附件"),
+        ("@机器人\u2005读取文档 这份文件的结论是什么", "读取文档 这份文件的结论是什么"),
     ],
 )
 async def test_group_pdf_then_mention_attaches_text(serve, tmp_path, mode, body, prompt):
@@ -784,7 +786,7 @@ async def test_group_recent_pdf_needs_matching_fresh_file(serve, tmp_path, case)
 
 async def test_group_pdf_request_without_mention_is_ignored(serve, tmp_path):
     file = file_message(threadId="room@chatroom")
-    request = group_request("总结一下这个PDF")
+    request = group_request("读取文档")
     request["mentions"]["self"] = False
     env = await make_env(serve, tmp_path, request, group_reply_mode="all")
     env.add_file(file)
@@ -810,37 +812,106 @@ async def test_group_generic_file_words_do_not_hijack_chat_without_a_recent_file
         await env.adapter.terminate()
 
 
+@pytest.mark.parametrize("recent", [False, True])
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "",
+        "分析刚才的图片",
+        "看看这张图",
+        "PDF是什么格式？",
+        "帮我写一份工作文档",
+        "这份文件的结论是什么",
+        "听听刚才的语音",
+        "转文字",
+        "说了什么",
+        "如何使用读取附件？",
+        "读取图片的功能怎么配置？",
+        "读取文档功能",
+        "读取语音识别配置",
+        "读取附",
+    ],
+)
+async def test_group_media_words_and_bare_mention_stay_ordinary_chat(
+    serve, tmp_path, recent, prompt
+):
+    request = group_request("@机器人\u2005" + prompt)
+    env = await make_env(serve, tmp_path, request)
+    sources = [
+        message(id="image-1", serverId="799", threadId="room@chatroom", type=3, body=None),
+        message(id="voice-1", serverId="798", threadId="room@chatroom", type=34, body=None),
+        file_message(threadId="room@chatroom"),
+    ]
+    env.messages.update({source["id"]: source for source in sources})
+    try:
+        if recent:
+            for cursor, source in enumerate(sources, 1):
+                await deliver(env, source, str(cursor))
+            assert env.queue.empty()
+        await deliver(env, request, "4")
+        event = env.queue.get_nowait()
+        assert event.message_str == prompt
+        assert event.get_extra("wechat_native_media_kind") is None
+        assert env.sent == []
+        assert not any(path.endswith(("/media", "/content")) for path in env.paths)
+    finally:
+        await env.adapter.terminate()
+
+
+async def test_group_read_attachment_without_recent_media_asks_to_resend(serve, tmp_path):
+    request = group_request("@机器人\u2005读取附件")
+    env = await make_env(serve, tmp_path, request)
+    try:
+        await deliver(env, request)
+        assert env.queue.empty()
+        assert len(env.sent) == 1
+        assert "未找到" in env.sent[0][1]["text"] and "附件" in env.sent[0][1]["text"]
+        assert not any(path.endswith(("/media", "/content")) for path in env.paths)
+    finally:
+        await env.adapter.terminate()
+
+
 async def test_group_recent_non_pdf_file_falls_back_to_ordinary_chat(serve, tmp_path):
     file = file_message(threadId="room@chatroom")
-    request = group_request("@机器人\u2005分析一下这个文件")
+    request = group_request("@机器人\u2005读取文档")
     env = await make_env(serve, tmp_path, request)
     env.add_file(file, b"PK", "notes.docx")
     try:
         await deliver(env, file, "1")
         await deliver(env, request, "2")
         event = env.queue.get_nowait()
-        assert event.message_str == "分析一下这个文件"
+        assert event.message_str == "读取文档"
         assert event.get_extra("wechat_native_pdf") is None
         assert env.sent == [] and env.content_requests == []
     finally:
         await env.adapter.terminate()
 
 
-async def test_group_recent_media_picks_the_requested_or_newest_kind(serve, tmp_path):
+@pytest.mark.parametrize("command,kind", [("读取附件", "pdf"), ("读取图片", "image")])
+async def test_group_recent_media_picks_the_requested_or_newest_kind(
+    serve, tmp_path, command, kind
+):
     image = message(id="image-1", serverId="799", threadId="room@chatroom", type=3, body=None)
     file = file_message(threadId="room@chatroom")
     file["createdAt"] = (datetime.now(UTC) + timedelta(seconds=1)).isoformat()
-    request = group_request("@机器人\u2005")
+    request = group_request("@机器人\u2005" + command)
     env = await make_env(serve, tmp_path, request)
     env.messages["image-1"] = image
+    asset = media_asset("image-asset", accountId="a", message_id="image-1")
+    env.assets["image-1"] = [asset]
+    env.contents[asset["id"]] = VALID_JPEG
     env.add_file(file)
     try:
         await deliver(env, image, "1")
         await deliver(env, file, "2")
         await deliver(env, request, "3")
         event = env.queue.get_nowait()
-        assert event.get_extra("wechat_native_media_kind") == "pdf"
-        assert UNIQUE in event.get_extra("wechat_native_pdf")["text"]
+        assert event.get_extra("wechat_native_media_kind") == kind
+        assert [path for path in env.paths if path.endswith("/media")] == [
+            f"/v1/accounts/a/messages/{'file-1' if kind == 'pdf' else 'image-1'}/media"
+        ]
+        if kind == "pdf":
+            assert UNIQUE in event.get_extra("wechat_native_pdf")["text"]
     finally:
         await env.adapter.terminate()
 

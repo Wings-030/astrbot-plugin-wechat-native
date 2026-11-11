@@ -399,6 +399,13 @@ class WeChatNativeAdapter(Platform):
             or is_summary_command(prompt)
         ):
             return None, None
+        command = re.match(
+            r"^(读取附件|读取图片|读取语音|读取文档|读取PDF)(?=$|[\s，。！？：；、,.!?:;])",
+            prompt.strip(),
+            re.IGNORECASE,
+        )
+        if not command:
+            return None, None
         key = (raw["threadId"], raw["senderId"])
         sources = {}
         for name, store, seconds in (
@@ -411,35 +418,17 @@ class WeChatNativeAdapter(Platform):
                 store.pop(key)
                 source = None
             sources[name] = source
-        image_asked = bool(
-            re.search(r"图片|照片|截图|看图|识图|这张图|那张图|刚才.{0,6}图", prompt)
-        )
-        # Generic file words only count when a recent file exists, so ordinary chat
-        # mentioning "文档" is never hijacked; an explicit "PDF" always counts.
-        file_asked = bool(re.search(r"(?i)pdf", prompt)) or (
-            sources["pdf"] is not None and bool(re.search(r"文件|文档|论文|这份|那份", prompt))
-        )
-        voice_asked = bool(
-            re.search(r"语音|录音|音频|听听|听一下|转文字|转成文字|说了啥|说了什么", prompt)
-        )
-        wanted = [
-            name
-            for name, asked in (("image", image_asked), ("pdf", file_asked), ("voice", voice_asked))
-            if asked
-        ]
-        if not wanted:
+        requested = command[1]
+        if requested == "读取附件":
             present = [name for name, source in sources.items() if source]
-            if prompt.strip() or not present:
-                return None, None
-            wanted = [max(present, key=lambda name: sources[name]["timestamp"])]
-        elif len(wanted) > 1:
-            present = [name for name in wanted if sources[name]]
-            wanted = (
-                [max(present, key=lambda name: sources[name]["timestamp"])]
-                if present
-                else wanted[:1]
+            if not present:
+                return "attachment", None
+            kind = max(present, key=lambda name: sources[name]["timestamp"])
+        else:
+            kind = {"读取图片": "image", "读取语音": "voice", "读取文档": "pdf"}.get(
+                requested, "pdf"
             )
-        return wanted[0], sources[wanted[0]]
+        return kind, sources[kind]
 
     async def _check_quote_original(
         self, raw: dict, wrapped: WeChatNativeEvent, original_id: str
@@ -555,7 +544,7 @@ class WeChatNativeAdapter(Platform):
         media_kind = wrapped.get_extra("wechat_native_media_kind") or "image"
         is_pdf = media_kind == "pdf"
         is_voice = media_kind == "voice"
-        label = {"pdf": "PDF", "voice": "语音", "image": "图片"}[media_kind]
+        label = {"pdf": "PDF", "voice": "语音", "image": "图片", "attachment": "附件"}[media_kind]
         recent_request = wrapped.get_extra("wechat_native_recent_image_request")
 
         def guard() -> None:
@@ -575,7 +564,12 @@ class WeChatNativeAdapter(Platform):
                     "WeChat Native %s处理开始：message=%s quoted=%s", label, message_id, is_quote
                 )
                 if recent_request and not wrapped.get_extra("wechat_native_recent_image"):
-                    raise MediaError("recent_unavailable", media_kind=media_kind)
+                    raise MediaError(
+                        "recent_attachment_unavailable"
+                        if media_kind == "attachment"
+                        else "recent_unavailable",
+                        media_kind=media_kind,
+                    )
                 if is_quote:
                     quote = raw.get("quote")
                     if (

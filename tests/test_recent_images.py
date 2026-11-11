@@ -12,7 +12,7 @@ async def make_recent_adapter(serve, tmp_path, **options):
     request = message(
         id="image-request",
         threadId="room@chatroom",
-        body="@机器人\u2005分析刚才的图片",
+        body="@机器人\u2005读取图片",
         mentions={"state": "known", "self": True},
     )
     messages = {image["id"]: image, request["id"]: request}
@@ -38,14 +38,25 @@ async def make_recent_adapter(serve, tmp_path, **options):
 
 
 @pytest.mark.parametrize("mode", ["mention", "all"])
-@pytest.mark.parametrize("prompt", ["@机器人\u2005分析刚才的图片", "@机器人\u2005"])
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "读取图片",
+        "读取附件",
+        "读取图片 帮我描述内容",
+        "读取图片，帮我描述内容",
+        "读取图片：这是什么？",
+        "读取图片，请总结成PDF再转成语音",
+        "  读取图片  ",
+    ],
+)
 async def test_group_image_then_mention_attaches_image(serve, tmp_path, mode, prompt):
     from astrbot.api.message_components import At, Image, Plain
 
     adapter, queue, image, request, sent, paths, _ = await make_recent_adapter(
         serve, tmp_path, group_reply_mode=mode
     )
-    request["body"] = prompt
+    request["body"] = "@机器人\u2005" + prompt
     try:
         await adapter.process_native_event(native_event(image, "1"))
         assert queue.empty()
@@ -55,9 +66,7 @@ async def test_group_image_then_mention_attaches_image(serve, tmp_path, mode, pr
         assert queue.qsize() == 1
         event = queue.get_nowait()
         assert [type(part) for part in event.get_messages()] == [At, Plain, Image]
-        assert event.message_str == (
-            "请描述这张图片的内容。" if prompt == "@机器人\u2005" else "分析刚才的图片"
-        )
+        assert event.message_str == prompt.lstrip(" \t")
         assert [path for path in paths if path.endswith("/media")] == [
             "/v1/accounts/a/messages/group-image/media"
         ]
@@ -96,7 +105,7 @@ async def test_group_recent_image_request_requires_matching_fresh_image(serve, t
     [
         ("@机器人\u2005你好", True),
         ("@机器人\u2005总结群聊", True),
-        ("分析刚才的图片", False),
+        ("读取图片", False),
     ],
 )
 async def test_group_recent_image_keeps_other_text_rules(serve, tmp_path, prompt, mentioned):

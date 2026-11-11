@@ -431,12 +431,13 @@ async def test_quoted_image_metadata_error_uses_verified_original(serve, tmp_pat
     adapter, queue, msg, _, sent, requests = await make_quote_fallback_adapter(
         serve, tmp_path, thread=thread
     )
+    msg["body"] = "这是什么意思？"
     try:
         await adapter.process_native_event(native_event(msg, "2"))
         await asyncio.gather(*list(adapter._media_tasks))
         assert queue.qsize() == 1
         event = queue.get_nowait()
-        assert event.message_str == "帮我分析这张图"
+        assert event.message_str == "这是什么意思？"
         images = [part for part in event.get_messages() if isinstance(part, Image)]
         assert len(images) == 1
         assert images[0].file == "base64://" + base64.b64encode(VALID_JPEG).decode()

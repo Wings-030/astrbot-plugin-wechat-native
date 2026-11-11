@@ -475,7 +475,7 @@ async def test_group_recent_or_quoted_voice_with_real_mention(serve, tmp_path, q
     request = message(
         id="request",
         threadId="room@chatroom",
-        body="@机器人\u2005听听刚才的语音",
+        body="@机器人\u2005读取语音" if not quote else "@机器人\u2005这是什么意思？",
         mentions={"state": "known", "self": True},
     )
     if quote:
@@ -492,7 +492,7 @@ async def test_group_recent_or_quoted_voice_with_real_mention(serve, tmp_path, q
         assert not any(path.endswith("/media") for _, path in result.requests)
         await drain_voice(result, request, "2")
         event = result.queue.get_nowait()
-        assert event.message_str == "听听刚才的语音"
+        assert event.message_str == ("读取语音" if not quote else "这是什么意思？")
         assert any(isinstance(part, Record) for part in event.get_messages())
         assert event.get_extra("wechat_native_quote_original_id") == "voice-original"
     finally:
@@ -501,9 +501,9 @@ async def test_group_recent_or_quoted_voice_with_real_mention(serve, tmp_path, q
 
 @pytest.mark.parametrize(
     "prompt_text",
-    ["@机器人\u2005转文字", "@机器人\u2005说了啥", "@机器人\u2005转成文字"],
+    ["@机器人\u2005读取语音", "@机器人\u2005读取附件", "@机器人\u2005读取语音，转成文字"],
 )
-async def test_group_recent_voice_trigger_keywords(serve, tmp_path, prompt_text):
+async def test_group_recent_voice_trigger_commands(serve, tmp_path, prompt_text):
     voice = message(
         id="voice-original", serverId="800", type=34, body=None, threadId="room@chatroom"
     )
@@ -824,7 +824,7 @@ async def test_recent_voice_is_scoped_fresh_and_not_recalled(serve, tmp_path, ca
     request = message(
         id="request",
         threadId="room@chatroom",
-        body="@机器人\u2005听听刚才的语音",
+        body="@机器人\u2005读取语音",
         mentions={"state": "known", "self": True},
     )
     if case == "other_sender":

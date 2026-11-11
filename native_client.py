@@ -91,6 +91,9 @@ MEDIA_ERROR_MESSAGES = {
     "unsupported_format": "暂不支持这种图片格式。",
     "recalled": "",
     "recent_unavailable": "未找到你在本群最近2分钟发送的图片，请重新发送或引用图片。",
+    "recent_attachment_unavailable": (
+        "未找到你在本群最近2分钟发送的附件，请重新发送或引用图片、语音或 PDF 文件。"
+    ),
 }
 
 PDF_ERROR_MESSAGES = {
