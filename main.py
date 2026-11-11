@@ -165,6 +165,52 @@ class WeChatNativePlugin(Star):
             TextPart(text=pdf_context_text(str(pdf.get("name") or "未命名.pdf"), pdf["text"]))
         )
 
+    @filter.command("读取附件")
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
+    async def read_attachment(self, event: AstrMessageEvent):
+        """@机器人读取自己在本群最近2分钟发送的媒体，也可追加问题。"""
+        await self._read_media_command(event)
+
+    @filter.command("读取图片")
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
+    async def read_image(self, event: AstrMessageEvent):
+        """@机器人读取自己在本群最近2分钟发送的图片，也可追加问题。"""
+        await self._read_media_command(event)
+
+    @filter.command("读取语音")
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
+    async def read_voice(self, event: AstrMessageEvent):
+        """@机器人读取自己在本群最近2分钟发送的语音，使用已配置的 ASR。"""
+        await self._read_media_command(event)
+
+    @filter.command("读取文档", alias={"读取PDF", "读取pdf"})
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
+    async def read_document(self, event: AstrMessageEvent):
+        """@机器人读取自己在本群最近2分钟发送的 PDF，也可追加问题。"""
+        await self._read_media_command(event)
+
+    async def _read_media_command(self, event: AstrMessageEvent):
+        if not is_native_event(event) or not event.get_group_id():
+            return
+        mentions = event.message_obj.raw_message.get("mentions")
+        if not (
+            isinstance(mentions, dict)
+            and mentions.get("state") == "known"
+            and mentions.get("self") is True
+        ):
+            return
+        # The adapter has already loaded the media. Returning lets AstrBot's normal
+        # model pipeline use its Image/Record components and PDF context hook once.
+        if event.get_extra("wechat_native_media_kind"):
+            return
+        text = (
+            "请先在 WeChat Native 机器人参数中开启图片、PDF 与语音识别。"
+            if not event.adapter.native_config.enable_media
+            else "请先发送图片、语音或 PDF 文件，再 @机器人使用读取指令；其他文件暂不支持。"
+        )
+        await event.send(event.plain_result(text))
+        event.stop_event()
+
     @filter.command("谁最能聊")
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=100)
     async def rank_group(self, event: AstrMessageEvent):

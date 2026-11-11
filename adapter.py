@@ -20,6 +20,8 @@ from astrbot.api.platform import (
     register_platform_adapter,
 )
 from astrbot.api.star import StarTools
+from astrbot.core.star.filter.command import CommandFilter
+from astrbot.core.star.star_handler import star_handlers_registry
 
 from .config import (
     ADAPTER_ID,
@@ -399,12 +401,32 @@ class WeChatNativeAdapter(Platform):
             or is_summary_command(prompt)
         ):
             return None, None
-        command = re.match(
-            r"^(读取附件|读取图片|读取语音|读取文档|读取PDF)(?=$|[\s，。！？：；、,.!?:;])",
-            prompt.strip(),
-            re.IGNORECASE,
-        )
-        if not command:
+        requested = None
+        for media_kind, handler_name, names in (
+            ("attachment", "read_attachment", ["读取附件"]),
+            ("image", "read_image", ["读取图片"]),
+            ("voice", "read_voice", ["读取语音"]),
+            ("pdf", "read_document", ["读取文档", "读取PDF"]),
+        ):
+            handler = star_handlers_registry.get_handler_by_full_name(
+                f"{__package__}.main_{handler_name}"
+            )
+            if handler is not None:
+                if not handler.enabled:
+                    continue
+                names = [
+                    name
+                    for command in handler.event_filters
+                    if isinstance(command, CommandFilter)
+                    for name in command.get_complete_command_names()
+                ]
+            if any(
+                re.match(re.escape(name) + r"(?=$|[\s，。！？：；、,.!?:;])", prompt.strip(), re.I)
+                for name in names
+            ):
+                requested = media_kind
+                break
+        if requested is None:
             return None, None
         key = (raw["threadId"], raw["senderId"])
         sources = {}
@@ -418,16 +440,13 @@ class WeChatNativeAdapter(Platform):
                 store.pop(key)
                 source = None
             sources[name] = source
-        requested = command[1]
-        if requested == "读取附件":
+        if requested == "attachment":
             present = [name for name, source in sources.items() if source]
             if not present:
                 return "attachment", None
             kind = max(present, key=lambda name: sources[name]["timestamp"])
         else:
-            kind = {"读取图片": "image", "读取语音": "voice", "读取文档": "pdf"}.get(
-                requested, "pdf"
-            )
+            kind = requested
         return kind, sources[kind]
 
     async def _check_quote_original(
