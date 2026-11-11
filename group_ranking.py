@@ -17,7 +17,11 @@ EMPTY_MESSAGE = "今天暂无可统计的聊天消息。"
 QUERY_ERROR = "暂时查不到群聊记录，请稍后再试。"
 ANALYSIS_SYSTEM_PROMPT = (
     "从提供的群聊文本样本中提取最多3个有依据的热门话题，每个话题最多20个字符。"
+    "话题使用具体的讨论对象或事情作为短标题，合并近义和重复话题，"
+    "不使用‘日常闲聊’‘热烈讨论’等空泛标题，不为凑满3个而编造话题。"
     "同时根据今天实际聊到的内容写一句简短自然的中文点评，最多160个字符。"
+    "点评像群友接话，点出一两个真实讨论细节，不逐条复述话题，不说教，"
+    "不使用夸张的颁奖词，不贬低成员，不推断性格或私人情况。"
     "点评要具体、通俗，不套固定文案，不使用战力、聊力等术语，不编造排名或统计数字。"
     '只返回JSON对象，格式为{"topics":["话题"],"comment":"点评"}，不加代码围栏或解释。'
     "没有明显话题时topics返回空数组，comment返回空字符串。"
@@ -32,6 +36,10 @@ class DailyRanking:
     names: dict[str, str]
     texts: list[str]
     partial: bool
+    as_of: datetime
+    participants: int
+    turn_count: int
+    message_count: int
     bot_name: str = "机器人"
 
 
@@ -93,6 +101,9 @@ async def collect_ranking(ctx):
                 items = page.get("items")
                 if not isinstance(items, list) or len(items) > 50:
                     raise ValueError("invalid_history_page")
+                coverage = page.get("coverage")
+                if isinstance(coverage, dict) and coverage.get("partial") is True:
+                    partial = True
                 for item in items:
                     if not isinstance(item, dict):
                         raise ValueError("invalid_history_item")
@@ -148,6 +159,17 @@ async def collect_ranking(ctx):
             turns[sender] += 1
         previous = (sender, stamp)
     ordered = sorted(turns, key=lambda sender: (-turns[sender], -counts[sender], sender))
+    logger.info(
+        "群聊排行榜查询完成：pages=%s members=%s messages=%s partial=%s cutoff=%s latest=%s",
+        pages,
+        len(counts),
+        len(texts),
+        partial,
+        now.isoformat(timespec="seconds"),
+        datetime.fromtimestamp(texts[-1][0], tz=now.tzinfo).isoformat(timespec="seconds")
+        if texts
+        else "none",
+    )
     leaders = [(sender, turns[sender], counts[sender]) for sender in ordered[:5]]
     names, bot_name = {}, "机器人"
     if leaders:
@@ -162,7 +184,17 @@ async def collect_ranking(ctx):
             sender: f"{name}（{short_id(sender)}）" if duplicates[name] > 1 else name
             for sender, name in names.items()
         }
-    return DailyRanking(leaders, names, [text for _, _, _, text in texts], partial, bot_name)
+    return DailyRanking(
+        leaders=leaders,
+        names=names,
+        texts=[text for _, _, _, text in texts],
+        partial=partial,
+        as_of=now,
+        participants=len(counts),
+        turn_count=sum(turns.values()),
+        message_count=len(texts),
+        bot_name=bot_name,
+    )
 
 
 def analysis_prompt(texts):
@@ -176,6 +208,9 @@ def analysis_prompt(texts):
 
 
 def parse_analysis(text):
+    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text.strip(), re.DOTALL | re.IGNORECASE)
+    if fenced:
+        text = fenced.group(1)
     value = json.loads(text)
     if not isinstance(value, dict):
         raise ValueError("invalid_analysis")
@@ -201,7 +236,13 @@ def format_ranking(ranking, analysis=None):
         return QUERY_ERROR
     if not ranking.leaders:
         return EMPTY_MESSAGE
-    lines = [COMMAND, ""]
+    lines = [
+        COMMAND + " · 今日榜",
+        f"统计时段：{ranking.as_of:%Y-%m-%d} 00:00–{ranking.as_of:%H:%M}",
+        f"本次统计：{ranking.participants} 人 · {ranking.turn_count} 次发言 · "
+        f"{ranking.message_count} 条消息",
+        "",
+    ]
     lines.extend(
         f"{index}. {ranking.names[sender]}：{turns} 次发言 · {messages} 条消息"
         for index, (sender, turns, messages) in enumerate(ranking.leaders, 1)

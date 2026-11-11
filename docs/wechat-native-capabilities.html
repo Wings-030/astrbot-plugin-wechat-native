@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>群聊协作与运行保障</title>
+  <!-- Diagram Design: minimal light, doc-inline, architecture.
+       Project palette: paper #f4f7f3, ink #20382b, accent #176b43.
+       Font source: system; Geist / Instrument Serif / Geist Mono use local fallbacks.
+       Scope: overview only; detailed limits and configuration live in features.md and README.md. -->
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 24px; background: #f4f7f3; color: #20382b; font-family: 'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif; }
+    .frame { max-width: 960px; min-width: 0; margin: auto; }
+    .diagram-container { width: 100%; overflow-x: auto; }
+    svg { width: 100%; min-width: 960px; display: block; }
+    @media print {
+      body { padding: 0; }
+      .diagram-container { overflow-x: visible; }
+      svg { min-width: 0; }
+    }
+  </style>
+</head>
+<body>
+<main class="frame"><div class="diagram-container">
+<svg viewBox="0 0 960 600" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="wechat-native-capabilities-title wechat-native-capabilities-desc">
+<title id="wechat-native-capabilities-title">群聊协作与运行保障</title>
+<desc id="wechat-native-capabilities-desc">群聊指令处理摘要与排行，自然语言工具限定当前账号和聊天并按权限执行，所有交互共用白名单、会话隔离、熔断与持久化回执。</desc>
+<defs><marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0 L8 3 L0 6 Z" fill="#486150"/></marker></defs>
+<rect width="960" height="600" fill="#f4f7f3"/>
+<text x="40" y="36" font-family="'Geist Mono', 'Consolas', monospace" font-size="8" font-weight="500" fill="#176b43" text-anchor="start">WECHAT NATIVE / 02</text><text x="40" y="80" font-family="'Instrument Serif', 'Noto Serif SC', 'SimSun', serif" font-size="28" font-weight="400" fill="#20382b" text-anchor="start">群聊协作，按权限运行</text><text x="40" y="108" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#486150" text-anchor="start">常用指令、当前聊天工具与运行保障；各项能力的开关和授权范围彼此独立。</text>
+<rect x="40" y="140" width="312" height="264" rx="8" fill="none" stroke="#bdcbbf" stroke-width="1"/>
+<text x="56" y="168" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#526957" text-anchor="start">群内指令 · 真正 @机器人</text>
+<rect x="376" y="140" width="544" height="264" rx="8" fill="none" stroke="#486150" stroke-width="1" stroke-dasharray="4 4"/>
+<text x="392" y="168" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#526957" text-anchor="start">自然语言工具 · 仅当前账号、当前聊天</text>
+<rect x="56" y="184" width="280" height="96" rx="6" fill="#e6efe7" stroke="#176b43" stroke-width="1"/>
+<text x="72" y="212" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="14" font-weight="600" fill="#20382b" text-anchor="start">总结群聊 / 群聊摘要</text>
+<text x="72" y="236" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#486150" text-anchor="start">需开启摘要；整理实时文本缓存</text>
+<text x="72" y="256" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#486150" text-anchor="start">要点 · 结论 · 待办 · 未解决问题</text>
+<rect x="56" y="296" width="280" height="92" rx="6" fill="#fafcf9" stroke="#486150" stroke-width="1"/>
+<text x="72" y="324" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="14" font-weight="600" fill="#20382b" text-anchor="start">谁最能聊</text>
+<text x="72" y="348" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#486150" text-anchor="start">今日发言排行 · 热门话题</text>
+<text x="72" y="368" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#486150" text-anchor="start">无需开启摘要或历史工具</text>
+<rect x="392" y="184" width="264" height="96" rx="6" fill="#fafcf9" stroke="#486150" stroke-width="1"/>
+<text x="408" y="212" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="14" font-weight="600" fill="#20382b" text-anchor="start">历史与群资料 · 4 个工具</text>
+<text x="408" y="236" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#486150" text-anchor="start">最近消息 / 搜索 / 群资料 / 成员</text>
+<text x="408" y="256" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#486150" text-anchor="start">需开启 enable_history_tools</text>
+<rect x="680" y="184" width="224" height="96" rx="6" fill="#fafcf9" stroke="#486150" stroke-width="1"/>
+<text x="696" y="212" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="14" font-weight="600" fill="#20382b" text-anchor="start">真正点名群成员</text>
+<text x="696" y="236" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#486150" text-anchor="start">按真实 username 发送 @</text>
+<text x="696" y="256" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#486150" text-anchor="start">使用日常 read / send 凭据</text>
+<rect x="392" y="296" width="512" height="92" rx="6" fill="#fafcf9" stroke="#486150" stroke-width="1"/>
+<text x="408" y="324" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="14" font-weight="600" fill="#20382b" text-anchor="start">微信修改 · 3 个工具</text>
+<text x="408" y="348" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#486150" text-anchor="start">自身群昵称 / 群改名：需开启写工具和独立管理 Token</text>
+<text x="408" y="368" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#486150" text-anchor="start">撤回自身消息：需开启写工具；改群名与撤回还需管理员</text>
+<text x="40" y="440" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#526957" text-anchor="start">所有交互共用运行保障</text>
+<rect x="40" y="456" width="416" height="60" rx="6" fill="#fafcf9" stroke="#486150" stroke-width="1"/>
+<text x="56" y="484" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="14" font-weight="600" fill="#20382b" text-anchor="start">白名单 · 独立会话 · 自动回复熔断</text>
+<rect x="480" y="456" width="440" height="60" rx="6" fill="#fafcf9" stroke="#486150" stroke-width="1"/>
+<text x="496" y="484" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="14" font-weight="600" fill="#20382b" text-anchor="start">断线重连 · 持久化去重 · 回执与统计面板</text>
+<path d="M40 540 H920" stroke="#bdcbbf"/><text x="40" y="568" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#486150" text-anchor="start">分区表示作用范围；具体开关、凭据与权限见下方配置。</text><text x="920" y="568" font-family="'Geist Mono', 'Consolas', monospace" font-size="8" font-weight="500" fill="#526957" text-anchor="end">GROUPS / TOOLS / OPERATIONS</text>
+</svg>
+</div></main>
+</body>
+</html>

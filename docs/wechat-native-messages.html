@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>从微信消息到智能回复</title>
+  <!-- Diagram Design: minimal light, doc-inline, architecture.
+       Project palette: paper #f4f7f3, ink #20382b, accent #176b43.
+       Font source: system; Geist / Instrument Serif / Geist Mono use local fallbacks.
+       Scope: overview only; detailed limits and configuration live in features.md and README.md. -->
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 24px; background: #f4f7f3; color: #20382b; font-family: 'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif; }
+    .frame { max-width: 960px; min-width: 0; margin: auto; }
+    .diagram-container { width: 100%; overflow-x: auto; }
+    svg { width: 100%; min-width: 960px; display: block; }
+    @media print {
+      body { padding: 0; }
+      .diagram-container { overflow-x: visible; }
+      svg { min-width: 0; }
+    }
+  </style>
+</head>
+<body>
+<main class="frame"><div class="diagram-container">
+<svg viewBox="0 0 960 600" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="wechat-native-messages-title wechat-native-messages-desc">
+<title id="wechat-native-messages-title">从微信消息到智能回复</title>
+<desc id="wechat-native-messages-desc">文本、图片、PDF 与语音经 Native 服务和内置插件接入 AstrBot，由模型与媒体服务生成微信回复。</desc>
+<defs><marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0 L8 3 L0 6 Z" fill="#486150"/></marker></defs>
+<rect width="960" height="600" fill="#f4f7f3"/>
+<text x="40" y="36" font-family="'Geist Mono', 'Consolas', monospace" font-size="8" font-weight="500" fill="#176b43" text-anchor="start">WECHAT NATIVE / 01</text><text x="40" y="80" font-family="'Instrument Serif', 'Noto Serif SC', 'SimSun', serif" font-size="28" font-weight="400" fill="#20382b" text-anchor="start">从微信消息到智能回复</text><text x="40" y="108" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#486150" text-anchor="start">私聊直接交互，群聊默认真正 @机器人；模型与语音服务由 AstrBot 配置。</text>
+<rect x="504" y="164" width="416" height="224" rx="8" fill="none" stroke="#bdcbbf" stroke-width="1" stroke-dasharray="4 4"/>
+<text x="520" y="188" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#526957" text-anchor="start">AstrBot 运行环境 · 无需额外 Bridge</text>
+<path d="M248 200 H264 Q272 200 272 208 V280 Q272 288 280 288 H304" fill="none" stroke="#486150" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M248 308 H304" fill="none" stroke="#486150" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M248 424 H264 Q272 424 272 416 V336 Q272 328 280 328 H304" fill="none" stroke="#486150" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M480 308 H528" fill="none" stroke="#486150" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M688 308 H728" fill="none" stroke="#486150" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M824 352 V432" fill="none" stroke="#486150" stroke-width="1.2" marker-end="url(#arrow)"/>
+<rect x="40" y="156" width="208" height="88" rx="6" fill="#fafcf9" stroke="#486150" stroke-width="1"/>
+<text x="56" y="184" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="14" font-weight="600" fill="#20382b" text-anchor="start">文本 · 私聊与群聊</text>
+<text x="56" y="208" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#486150" text-anchor="start">真正 @唤醒或按规则触发</text>
+<text x="56" y="228" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#486150" text-anchor="start">支持接收引用消息</text>
+<rect x="40" y="268" width="208" height="88" rx="6" fill="#fafcf9" stroke="#486150" stroke-width="1"/>
+<text x="56" y="296" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="14" font-weight="600" fill="#20382b" text-anchor="start">图片 · PDF</text>
+<text x="56" y="320" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#486150" text-anchor="start">图片识别需视觉模型</text>
+<text x="56" y="340" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#486150" text-anchor="start">群内引用或使用读取指令</text>
+<rect x="40" y="380" width="208" height="88" rx="6" fill="#fafcf9" stroke="#486150" stroke-width="1"/>
+<text x="56" y="408" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="14" font-weight="600" fill="#20382b" text-anchor="start">微信语音</text>
+<text x="56" y="432" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#486150" text-anchor="start">语音转文字需 STT</text>
+<text x="56" y="452" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#486150" text-anchor="start">群内引用或使用读取指令</text>
+<rect x="304" y="264" width="176" height="88" rx="6" fill="#fafcf9" stroke="#486150" stroke-width="1"/>
+<text x="320" y="292" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="14" font-weight="600" fill="#20382b" text-anchor="start">Native 服务</text>
+<text x="320" y="316" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#486150" text-anchor="start">微信登录 · 媒体处理</text>
+<text x="320" y="336" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#486150" text-anchor="start">v1 API</text>
+<rect x="528" y="264" width="160" height="88" rx="6" fill="#e6efe7" stroke="#176b43" stroke-width="1"/>
+<text x="544" y="292" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="14" font-weight="600" fill="#20382b" text-anchor="start">接入插件</text>
+<text x="544" y="316" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#486150" text-anchor="start">消息适配 · 权限</text>
+<text x="544" y="336" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#486150" text-anchor="start">会话 · 发送回执</text>
+<rect x="728" y="248" width="176" height="104" rx="6" fill="#fafcf9" stroke="#486150" stroke-width="1"/>
+<text x="744" y="276" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="14" font-weight="600" fill="#20382b" text-anchor="start">AstrBot</text>
+<text x="744" y="300" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#486150" text-anchor="start">模型 · 人格 · 插件</text>
+<text x="744" y="320" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#486150" text-anchor="start">视觉 · STT · TTS</text>
+<rect x="528" y="432" width="376" height="76" rx="6" fill="#e6efe7" stroke="#176b43" stroke-width="1"/>
+<text x="544" y="460" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="14" font-weight="600" fill="#20382b" text-anchor="start">回复到微信私聊或群聊</text>
+<text x="544" y="484" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#486150" text-anchor="start">文本 / 图片 / 原生语音 · @ / 引用 / 直接发送</text>
+<text x="40" y="508" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#486150" text-anchor="start">支持文本转图片；普通文件发送暂不支持。</text>
+<path d="M40 540 H920" stroke="#bdcbbf"/><text x="40" y="568" font-family="'Geist', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="12" font-weight="400" fill="#486150" text-anchor="start">实线表示消息处理方向；语音回复需配置 TTS。</text><text x="920" y="568" font-family="'Geist Mono', 'Consolas', monospace" font-size="8" font-weight="500" fill="#526957" text-anchor="end">ASTRBOT + NATIVE / v1</text>
+</svg>
+</div></main>
+</body>
+</html>
