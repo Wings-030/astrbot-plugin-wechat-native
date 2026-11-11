@@ -1,20 +1,21 @@
-# Native v2.2.1 拍一拍补丁
+# Native v2.2.1 / v2.3.0 拍一拍补丁
 
 此补丁给已识别的群拍一拍消息增加 `pat: {actorId, targetId}`，继续通过 `message.committed` 交付。
 支持候选格式 `sysmsg/pat` 和 `49/62 appmsg/patMsg`；未识别的通知不猜测身份。
-原版 v2.2.1 不提供此字段，只升级插件不足以启用本功能。
+原版 v2.2.1 和 v2.3.0 均不提供此字段，只升级官方镜像或插件不足以启用本功能。
+同一份 `v2.2.1-pat.patch` 已在两个版本的精确 tag 源码上通过应用检查；以下使用 v2.3.0 构建。
 
 ## 在构建机器上操作
 
 ```bash
-git clone --branch v2.2.1 --depth 1 https://github.com/thisnick/agent-wechat.git agent-wechat-pat
+git clone --branch v2.3.0 --depth 1 https://github.com/thisnick/agent-wechat.git agent-wechat-pat
 cd agent-wechat-pat
 git apply --check /path/to/astrbot-plugin-wechat-native/native-patches/v2.2.1-pat.patch
 git apply /path/to/astrbot-plugin-wechat-native/native-patches/v2.2.1-pat.patch
-docker build -f deploy/native/Dockerfile -t agent-wechat-native:v2.2.1-pat .
+docker build -f deploy/native/Dockerfile -t agent-wechat-native:v2.3.0-pat .
 ```
 
-在现有 Compose 的 Native 服务中把 `image` 改成 `agent-wechat-native:v2.2.1-pat`，保留现有配置、凭据及数据卷，然后更新该服务：
+在现有 Compose 的 Native 服务中把 `image` 改成 `agent-wechat-native:v2.3.0-pat`，保留现有配置、凭据及数据卷，然后更新该服务：
 
 ```bash
 docker compose up -d --no-deps agent-wechat
@@ -41,4 +42,4 @@ docker compose logs --tail=200 -f agent-wechat
 
 日志不输出凭据、原始 XML、聊天正文、音频或转写正文。
 
-当前已通过 5 个插件针对性测试及补丁应用检查。Native Rust 编译、Docker 构建和真实微信收发未在本机执行，需在部署环境验证。
+当前已通过 5 个插件针对性测试，以及 v2.2.1 / v2.3.0 的补丁应用检查。Native Rust 编译、Docker 构建和真实微信收发未在本机执行，需在部署环境验证。
