@@ -70,12 +70,12 @@ CONFIG_METADATA = {
     },
     "admin_token_file": {
         "type": "string",
-        "description": "群管理专用 admin Token 文件路径",
+        "description": "扫码登录与群管理 admin Token 文件路径",
         "hint": (
             "默认 /run/secrets/wechat-admin-token；"
             "将宿主机 admin-token 文件只读挂载到此容器内路径，"
             "文件内容须为 Native 签发、具有目标账号 admin 权限的独立 Token。"
-            "仅开启微信修改与撤回工具后读取，此处填写文件路径而非 Token 文本。"
+            "仅面板扫码登录或微信修改与撤回工具使用，此处填写文件路径而非 Token 文本。"
         ),
     },
     "enable_history_tools": {

@@ -4,6 +4,49 @@
 
 本页说明消息可靠性、状态保留和回执排查。安装、配置及 Docker 部署请参阅 README。
 
+## 面板扫码登录与跨平台告警（Native v2.3.0）
+
+1. 保持 Native v2.3.0 服务运行，保存并启用 AstrBot 中的 `wechat_native` 机器人。
+2. 将既有 Admin Token 文件只读挂载到 `admin_token_file`，默认
+   `/run/secrets/wechat-admin-token`；凭据需有目标账号的 `admin` 权限。
+   连接检测仍读取原 `token_file`，不会回退用普通 Token 执行登录。
+3. 以 AstrBot Dashboard 配置的管理账号登录，打开插件的 WeChat Native 面板。
+   未认证时自动准备登录，扫码后在手机确认。过期、拒绝或失败时由用户手动重试。
+4. 在目标平台的管理员私聊发送 `/绑定通知`。多个 Native 实例时需追加 Native 机器人 ID。
+   运行 `/测试通知` 后在接收平台确认消息；`/通知状态` 显示最近监控结果及发送尝试情况。
+   英文等价命令为 `/bind_alert`、`/unbind_alert`、`/alert_status`、`/test_alert`。
+
+监控在插件 `initialize()` 后运行，每轮并发检查各机器人，单机器人探针不重叠且总超时 5 秒。
+连续三次 `offline/unavailable` 才创建事故，连续两次 `authenticated=true + connection=online`
+才判定恢复。首次启动在线只建立基线。账号或服务地址变化后重建基线，禁用或移除后停止检查。
+
+Plugin KV 保存绑定、登录幂等 Key/Operation 标识和事故状态。不要在故障排查时随意删除这些记录，
+否则会失去重启恢复与去重信息。二维码与 Token 不写 KV；QR 通过 Bridge 传入页面内存，
+页面隐藏时暂停轮询并清除图片，重新显示后查询原任务。不要截图分享仍有效的二维码。
+
+通知在调用 `Context.send_message()` 前先写入 attempted 标记；写入失败不发送，
+发送失败也不自动重试。没有绑定的事件记录为 `skipped_no_binding`，之后绑定不会补发断线消息；
+恢复时如已存在绑定，仍可发送当时的恢复消息。解绑只删除绑定，不删除事故。
+仅支持一个活跃 AstrBot 插件实例，多个进程共享 KV 的分布式去重不在本版范围内。
+
+### 排错
+
+| 表现 | 检查项 |
+| --- | --- |
+| 普通连接检测可用，登录被拒绝 | Dashboard 登录账号是否匹配配置的管理账号；Admin Token 文件挂载、内容及账号权限是否正确 |
+| 面板显示已连接但微信离线，无二维码 | 已认证账号正在重连；等待 Native 自恢复，只有未认证账号显示扫码入口 |
+| 二维码过期或代次冲突 | 查询原任务，手动点击“重新获取二维码”；活跃任务会复用，不会取消未知任务 |
+| “登录存储不可用” | 检查 AstrBot Plugin KV 可写性；不要清空登录 Key 后盲目重试 |
+| 私聊不能绑定 | 使用 AstrBot 已认证管理员身份，确认当前平台实例存在并启用，不能在群聊操作 |
+| 测试通知尝试失败 | 检查目标实例是否仍启用且类型未改变，及平台主动发送权限、配额和上下文有效期 |
+| 发送调用完成但没有收到 | 在实际平台核实送达；成功返回仅代表适配器调用完成，不代表接收或已读 |
+
+Dashboard 授权兼容性基于开发依赖固定的 AstrBot 提交
+`f61a7f42696da6df25dc7a249ec9b8d54ed9da18`：其 `AuthService.login()` 认证唯一配置的
+`dashboard.username`，Plugin Web API 从认证路由取得 `PluginRequest.username`。
+插件严格匹配二者；配置缺失、非匹配用户或无认证信息均拒绝登录 API。
+升级为多角色 Dashboard 后，应先核对宿主授权接口并更新契约测试。
+
 ## Native v1.5.1 工具操作与熔断
 
 工具返回 `not_available` 时，先查看同一时刻的插件日志。JSON 中的友好状态不会包含内部错误细节，

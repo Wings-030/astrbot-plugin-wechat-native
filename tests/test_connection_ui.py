@@ -43,10 +43,33 @@ def open_view(page, bots):
         """
         window.calls = [];
         window.pendingChecks = [];
+        window.pendingQrs = [];
         window.AstrBotPluginView = {
             ready: () => new Promise(resolve => { window.releaseReady = resolve; }),
+            apiPost: (endpoint, params) => {
+                window.calls.push([endpoint, params || {}]);
+                if (endpoint !== 'connection/login/start') throw new Error('unexpected endpoint');
+                return Promise.resolve(window.loginStartResult || {
+                    state: 'awaiting_scan', qr_available: true, qr_generation: 1
+                });
+            },
             apiGet: (endpoint, params) => {
                 window.calls.push([endpoint, params || {}]);
+                if (endpoint === 'connection/login/status') return Promise.resolve(
+                    window.loginStatusResult || {
+                        state: 'awaiting_scan', qr_available: true, qr_generation: 1
+                    }
+                );
+                if (endpoint === 'connection/login/qr') {
+                    if (window.deferQr) {
+                        return new Promise(resolve => window.pendingQrs.push(resolve));
+                    }
+                    return Promise.resolve({
+                        image: 'data:image/png;base64,' +
+                            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8A' +
+                            'AwMCAO+aS1UAAAAASUVORK5CYII=', generation: params.generation
+                    });
+                }
                 if (endpoint === 'connection/bots') return Promise.resolve({bots: BOTS});
                 if (endpoint === 'connection/panel') {
                     if (window.panelError) return Promise.reject(new Error('PRIVATE DETAILS'));
@@ -141,6 +164,155 @@ def test_bridge_failure_does_not_render_raw_exception(page):
     )
     expect(page.locator("body")).not_to_contain_text("SENSITIVE RAW ERROR")
     expect(page.get_by_role("button", name="刷新")).to_be_enabled()
+
+
+def offline_result():
+    return {"state": "connected", "wechat_online": False, "reason": "微信账号尚未登录",
+            "health": "offline", "auth_state": "unauthenticated"}
+
+
+def test_qr_scan_approval_and_account_online_confirmation(page):
+    open_view(page, [{"id": "native-1"}])
+    start_check(page)
+    complete(page, offline_result())
+    expect(page.locator("#login-qr")).to_be_visible()
+    expect(page.locator("#login-status")).to_contain_text("扫码")
+    assert page.locator("#login-qr").get_attribute("src").startswith("data:image/png;base64,")
+    page.evaluate("window.loginStatusResult = {state:'awaiting_approval', qr_available:false}")
+    expect(page.locator("#login-status")).to_contain_text("手机微信中确认", timeout=4000)
+    expect(page.locator("#login-qr")).to_be_hidden()
+    page.evaluate("window.loginStatusResult = {state:'succeeded', qr_available:false}")
+    page.wait_for_function("window.pendingChecks.length === 2", timeout=4000)
+    complete(page, {"state": "connected", "wechat_online": True,
+                    "health": "online", "auth_state": "authenticated"}, 1)
+    expect(page.locator("#login-panel")).to_be_hidden()
+    expect(page.locator("#wechat-status")).to_have_text("在线")
+    assert len(page.evaluate("window.calls.filter(c => c[0] === 'connection/login/start')")) == 1
+
+
+def test_terminal_login_requires_explicit_retry(page):
+    open_view(page, [{"id": "native-1"}])
+    page.evaluate("window.loginStartResult = {state:'expired',qr_available:false}")
+    start_check(page)
+    complete(page, offline_result())
+    expect(page.locator("#login-retry")).to_be_visible()
+    expect(page.locator("#login-status")).to_contain_text("过期")
+    page.get_by_role("button", name="刷新", exact=True).click()
+    page.wait_for_function("window.pendingChecks.length === 2")
+    complete(page, offline_result(), 1)
+    page.wait_for_timeout(2200)
+    assert len(page.evaluate("window.calls.filter(c => c[0] === 'connection/login/start')")) == 1
+    page.evaluate("""window.loginStartResult = {
+        state:'awaiting_scan',qr_available:true,qr_generation:2
+    }""")
+    page.locator("#login-retry").click()
+    expect(page.locator("#login-qr")).to_be_visible()
+    assert page.evaluate("""window.calls.filter(
+        c => c[0] === 'connection/login/start'
+    ).at(-1)[1]""") == {
+        "bot_id": "native-1", "retry": True,
+    }
+
+
+def test_qr_generation_replaced_and_visibility_resumes_same_operation(page):
+    open_view(page, [{"id": "native-1"}])
+    start_check(page)
+    complete(page, offline_result())
+    expect(page.locator("#login-qr")).to_be_visible()
+    page.evaluate("""() => {
+        Object.defineProperty(document, 'hidden', {configurable:true, value:true});
+        document.dispatchEvent(new Event('visibilitychange'));
+    }""")
+    before = len(page.evaluate("window.calls"))
+    page.wait_for_timeout(2200)
+    assert len(page.evaluate("window.calls")) == before
+    page.evaluate("""() => {
+        window.loginStatusResult = {state:'awaiting_scan',qr_available:true,qr_generation:2};
+        Object.defineProperty(document, 'hidden', {configurable:true, value:false});
+        document.dispatchEvent(new Event('visibilitychange'));
+    }""")
+    page.wait_for_function("""window.calls.some(
+        c => c[0] === 'connection/login/qr' && c[1].generation === 2
+    )""")
+    assert len(page.evaluate("window.calls.filter(c => c[0] === 'connection/login/start')")) == 1
+
+
+def test_bot_switch_discards_late_qr_response(page):
+    open_view(page, [{"id": "native-1"}, {"id": "native-2"}])
+    page.evaluate("window.deferQr = true")
+    start_check(page)
+    complete(page, offline_result())
+    page.wait_for_function("window.pendingQrs.length === 1")
+    page.get_by_label("机器人").select_option("native-2")
+    page.wait_for_function("window.pendingChecks.length === 2")
+    complete(page, offline_result(), 1)
+    page.wait_for_function("window.pendingQrs.length === 2")
+    page.evaluate("window.pendingQrs[0]({image:'data:image/png;base64,OLDQR',generation:1})")
+    expect(page.locator("#login-qr")).to_be_hidden()
+    page.evaluate("window.pendingQrs[1]({image:'data:image/png;base64,NEWQR',generation:1})")
+    expect(page.locator("#login-qr")).to_have_attribute("src", "data:image/png;base64,NEWQR")
+    assert "OLDQR" not in page.content()
+
+
+def test_switching_back_to_expired_bot_keeps_manual_retry_visible(page):
+    open_view(page, [{"id": "native-1"}, {"id": "native-2"}])
+    page.evaluate("window.loginStartResult = {state:'expired',qr_available:false}")
+    start_check(page)
+    complete(page, offline_result())
+    expect(page.locator("#login-retry")).to_be_visible()
+    page.get_by_label("机器人").select_option("native-2")
+    page.wait_for_function("window.pendingChecks.length === 2")
+    complete(page, {"state": "connected", "wechat_online": True,
+                    "health": "online", "auth_state": "authenticated"}, 1)
+    page.get_by_label("机器人").select_option("native-1")
+    page.wait_for_function("window.pendingChecks.length === 3")
+    complete(page, offline_result(), 2)
+    expect(page.locator("#login-retry")).to_be_visible()
+    expect(page.locator("#login-status")).to_contain_text("过期")
+
+
+def test_late_qr_cannot_reappear_after_account_becomes_online(page):
+    open_view(page, [{"id": "native-1"}])
+    page.evaluate("window.deferQr = true")
+    start_check(page)
+    complete(page, offline_result())
+    page.wait_for_function("window.pendingQrs.length === 1")
+    page.get_by_role("button", name="刷新", exact=True).click()
+    page.wait_for_function("window.pendingChecks.length === 2")
+    complete(page, {"state": "connected", "wechat_online": True,
+                    "health": "online", "auth_state": "authenticated"}, 1)
+    expect(page.locator("#login-panel")).to_be_hidden()
+    page.evaluate("window.pendingQrs[0]({image:'data:image/png;base64,LATEQR',generation:1})")
+    page.wait_for_timeout(100)
+    assert not page.locator("#login-qr").get_attribute("src")
+
+
+@pytest.mark.parametrize("result", [
+    {"state": "connected", "wechat_online": False, "health": "offline",
+     "auth_state": "authenticated"},
+    {"state": "failed", "wechat_online": None, "health": "unavailable",
+     "auth_state": "unknown"},
+])
+def test_ineligible_health_never_starts_login(page, result):
+    open_view(page, [{"id": "native-1"}])
+    start_check(page)
+    complete(page, result)
+    expect(page.get_by_role("button", name="刷新", exact=True)).to_be_enabled()
+    expect(page.locator("#login-panel")).to_be_hidden()
+    assert not page.evaluate("window.calls.some(c => c[0].startsWith('connection/login/'))")
+
+
+def test_login_authorization_failure_has_safe_manual_retry(page):
+    open_view(page, [{"id": "native-1"}])
+    page.evaluate("""() => {
+        window.AstrBotPluginView.apiPost = () =>
+            Promise.reject(new Error('SENSITIVE TOKEN RAW ERROR'));
+    }""")
+    start_check(page)
+    complete(page, offline_result())
+    expect(page.locator("#login-status")).to_contain_text("管理员权限")
+    expect(page.locator("#login-retry")).to_be_visible()
+    expect(page.locator("body")).not_to_contain_text("SENSITIVE")
 
 
 @pytest.mark.parametrize("reason", ["微信账号尚未登录", "微信账号当前不在线"])

@@ -2,6 +2,18 @@
 
 [返回 README](../README.md) · [部署与配置](../README.md#安装与配置)
 
+## 面板扫码登录与连接通知
+
+Native v2.3.0 账号未认证时，打开插件的 **WeChat Native 面板**，选择已启用的机器人，
+扫描二维码并在手机微信确认；任务失败或过期后点击“重新获取二维码”。
+管理凭据沿用 `admin_token_file`，详细前提见[运维说明](operations.md#面板扫码登录与跨平台告警native-v230)。
+
+在已接入 AstrBot 的目标平台**管理员私聊**发送 `/绑定通知 [native_bot_id]`，
+再用 `/测试通知 [native_bot_id]` 确认接收端是否收到。只有一个启用的 Native 实例时可省略 ID。
+`/通知状态` 查询最近监控状态，`/解绑通知` 移除接收目标。
+英文等价命令为 `/bind_alert`、`/test_alert`、`/alert_status`、`/unbind_alert`。
+每次事故最多尝试一次断线和一次恢复通知；平台调用成功不等于实际送达。
+
 ## 支持发送图片
 
 AstrBot 的 `Image` 组件可发送到微信私聊和群聊，也支持通过已保存会话主动发送。

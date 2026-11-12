@@ -92,7 +92,8 @@ async def test_connected_uses_saved_settings_and_only_two_gets(serve, tmp_path):
     _, context = plugin([robot])
     before = dict(robot)
     result = await api(context, "check", "bot_id=native-1&server_url=http://untrusted.invalid")
-    assert result == {"state": "connected", "wechat_online": True, "reason": ""}
+    assert result == {"state": "connected", "wechat_online": True, "reason": "",
+                      "health": "online", "auth_state": "authenticated"}
     assert calls == [("GET", "/prefix/v1/status"), ("GET", "/prefix/v1/accounts/account%2Fa")]
     assert robot == before
     assert not list(tmp_path.glob("*.sqlite3"))
@@ -136,6 +137,9 @@ async def test_short_failure_reasons(serve, status, account, want_online, reason
         "state": "connected" if want_online is False else "failed",
         "wechat_online": want_online,
         "reason": reason,
+        "health": "offline" if want_online is False else "unavailable",
+        "auth_state": ("authenticated" if account.get("authenticated") is True
+                       else "unauthenticated") if want_online is False else "unknown",
     }
 
 
@@ -161,6 +165,8 @@ async def test_http_failure_never_exposes_error_body(serve, status, reason):
         "state": "failed",
         "wechat_online": None,
         "reason": reason,
+        "health": "unavailable",
+        "auth_state": "unknown",
     }
     assert paths == ["/v1/status"]
 
@@ -185,6 +191,8 @@ async def test_invalid_or_unreadable_configuration_is_safe():
             "state": "failed",
             "wechat_online": None,
             "reason": "连接配置无效，请检查地址、Account ID 和 Token 配置",
+            "health": "unavailable",
+            "auth_state": "unknown",
         }
 
 

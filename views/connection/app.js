@@ -11,6 +11,157 @@ const chartHint = "将指针移到柱形上或用 Tab 查看每日数量";
 let checking = false;
 let botsLoaded = false;
 let chartDays = [];
+let viewRevision = 0;
+const loginPanel = document.getElementById("login-panel");
+const loginStatus = document.getElementById("login-status");
+const loginQr = document.getElementById("login-qr");
+const loginRetry = document.getElementById("login-retry");
+const loginEntries = new Map();
+
+function currentView(botId, revision) {
+  return select.value === botId && revision === viewRevision;
+}
+
+function clearQr() {
+  loginQr.hidden = true;
+  loginQr.removeAttribute("src");
+  delete loginQr.dataset.generation;
+}
+
+async function renderLogin(entry, result, botId, revision) {
+  if (!currentView(botId, revision) || document.hidden || !entry.allowed) return;
+  entry.state = result.state;
+  entry.error = false;
+  entry.terminal = ["expired", "failed", "rejected", "cancelled", "needs_login", "needs_review"].includes(result.state);
+  entry.verify = result.state === "succeeded";
+  loginPanel.hidden = false;
+  loginRetry.hidden = !entry.terminal && !entry.verify && result.state !== "pending";
+  loginRetry.disabled = false;
+  loginStatus.textContent = {
+    idle: "正在准备登录…", pending: "登录准备尚未完成，请重新获取以恢复原任务。",
+    queued: "正在准备登录…", running: "正在准备登录…",
+    starting: "正在准备登录…", resuming: "正在尝试恢复已有设备登录…",
+    authenticating: "手机已确认，正在完成账号认证…",
+    awaiting_scan: "请使用手机微信扫码登录。",
+    awaiting_approval: "请在手机微信中确认登录。",
+    succeeded: "登录任务已完成，正在确认微信上线。仍未上线时可重新获取二维码。",
+    expired: "二维码或登录任务已过期，请重新获取二维码。",
+    failed: "登录失败，请检查服务后重新获取二维码。",
+    rejected: "手机端已拒绝登录，可重新获取二维码。",
+    cancelled: "登录任务已取消，可重新获取二维码。",
+    needs_login: "需要重新登录，请重新获取二维码。",
+    needs_review: "登录结果待确认，请检查账号后手动重试。",
+  }[result.state] || "登录状态暂不可用，请刷新检查。";
+  if (result.state !== "awaiting_scan" || result.qr_available !== true) {
+    clearQr();
+    return;
+  }
+  const generation = result.qr_generation;
+  if (!Number.isInteger(generation) || generation < 1) throw new Error("invalid QR generation");
+  if (loginQr.dataset.generation === String(generation) && loginQr.hasAttribute("src")) return;
+  clearQr();
+  const qr = await bridge.apiGet("connection/login/qr", {bot_id: botId, generation});
+  if (!currentView(botId, revision) || document.hidden || !entry.allowed) return;
+  if (qr.generation !== generation || typeof qr.image !== "string"
+      || !/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(qr.image) || qr.image.length > 1400000) {
+    throw new Error("invalid QR image");
+  }
+  loginQr.src = qr.image;
+  loginQr.dataset.generation = String(generation);
+  loginQr.hidden = false;
+}
+
+function loginFailure(entry, botId, revision) {
+  if (!currentView(botId, revision) || document.hidden || !entry.allowed) return;
+  entry.terminal = true;
+  entry.error = true;
+  entry.verify = false;
+  clearQr();
+  loginPanel.hidden = false;
+  loginStatus.textContent = "登录请求失败，请检查管理员权限、Admin Token 与 Native 服务后重试。";
+  loginRetry.hidden = false;
+  loginRetry.disabled = false;
+}
+
+async function beginLogin(botId, revision, retry = false) {
+  const entry = loginEntries.get(botId);
+  if (entry.busy || document.hidden) return;
+  entry.busy = entry.started = true;
+  entry.terminal = entry.verify = false;
+  entry.error = false;
+  clearQr();
+  loginPanel.hidden = false;
+  loginStatus.textContent = "正在准备登录…";
+  loginRetry.disabled = true;
+  loginRetry.hidden = true;
+  try {
+    const params = retry ? {bot_id: botId, retry: true} : {bot_id: botId};
+    await renderLogin(entry, await bridge.apiPost("connection/login/start", params), botId, revision);
+  } catch {
+    loginFailure(entry, botId, revision);
+  } finally {
+    entry.busy = false;
+  }
+}
+
+async function pollLogin() {
+  const botId = select.value;
+  const revision = viewRevision;
+  const entry = loginEntries.get(botId);
+  if (document.hidden || !entry?.started || !entry.allowed || entry.busy || entry.completed) return;
+  if (entry.verify) {
+    await checkConnection();
+    return;
+  }
+  if (entry.terminal) return;
+  entry.busy = true;
+  try {
+    await renderLogin(entry, await bridge.apiGet("connection/login/status", {bot_id: botId}), botId, revision);
+    if (entry.verify && currentView(botId, revision)) await checkConnection();
+  } catch {
+    loginFailure(entry, botId, revision);
+  } finally {
+    entry.busy = false;
+  }
+}
+
+function updateLogin(result, botId, revision) {
+  let entry = loginEntries.get(botId);
+  if (result.health === "online") {
+    if (entry) { entry.completed = true; entry.allowed = false; }
+    clearQr();
+    loginPanel.hidden = true;
+    return;
+  }
+  if (result.health === "offline" && result.auth_state === "unauthenticated") {
+    if (!entry) {
+      entry = {started: false, busy: false};
+      loginEntries.set(botId, entry);
+    }
+    entry.allowed = true;
+    if (entry.completed) {
+      entry.completed = false;
+      void renderLogin(entry, {state: "needs_login", qr_available: false}, botId, revision);
+    } else if (!entry.started) {
+      void beginLogin(botId, revision);
+    } else if (entry.terminal) {
+      if (entry.error) loginFailure(entry, botId, revision);
+      else void renderLogin(entry, {state: entry.state, qr_available: false}, botId, revision);
+    } else if (entry.verify) {
+      void renderLogin(entry, {state: "succeeded", qr_available: false}, botId, revision);
+    } else if (!entry.terminal && !entry.verify) {
+      void pollLogin();
+    }
+    return;
+  }
+  clearQr();
+  if (entry) entry.allowed = result.health === "offline" && entry.verify;
+  loginPanel.hidden = !entry?.allowed;
+  if (entry?.allowed) {
+    loginStatus.textContent = "登录已完成，等待微信连接上线…";
+    loginRetry.hidden = true;
+  }
+}
 
 function render(state, wechatOnline = null, failureReason = "") {
   status.dataset.state = state;
@@ -122,20 +273,29 @@ function renderPanel(result, message = "") {
   }
 }
 
-async function loadPanel(botId) {
+async function loadPanel(botId, revision) {
   try {
     const result = await bridge.apiGet("connection/panel", {bot_id: botId});
+    if (!currentView(botId, revision)) return;
     renderPanel(result, result.reason || result.statistics?.reason || "");
   } catch {
+    if (!currentView(botId, revision)) return;
     renderPanel(null, "统计请求失败，请刷新重试");
   }
 }
 
-async function loadConnection(botId) {
+async function loadConnection(botId, revision) {
   try {
     const result = await bridge.apiGet("connection/check", {bot_id: botId});
+    if (!currentView(botId, revision)) return;
     render(result.state === "connected" ? "connected" : "failed", result.wechat_online, result.reason || "");
+    updateLogin(result, botId, revision);
   } catch {
+    if (!currentView(botId, revision)) return;
+    clearQr();
+    loginPanel.hidden = true;
+    const entry = loginEntries.get(botId);
+    if (entry) entry.allowed = false;
     render("failed", null, "检测请求失败，请确认 AstrBot 登录有效后重试");
   }
 }
@@ -163,7 +323,10 @@ async function checkConnection() {
       renderPanel(null, "保存并启动机器人后，这里将显示每日消息统计。");
       return;
     }
-    await Promise.all([loadPanel(select.value), loadConnection(select.value)]);
+    const botId = select.value;
+    const revision = viewRevision;
+    await Promise.all([loadPanel(botId, revision), loadConnection(botId, revision)]);
+    if (!currentView(botId, revision)) return;
     const now = new Date();
     const updated = document.getElementById("updated-at");
     updated.dateTime = now.toISOString();
@@ -179,13 +342,27 @@ async function checkConnection() {
 
 button.addEventListener("click", checkConnection);
 select.addEventListener("change", () => {
+  viewRevision++;
+  clearQr();
+  loginPanel.hidden = true;
   renderPanel(null, "统计加载中…");
   checkConnection();
+});
+loginRetry.addEventListener("click", () => { void beginLogin(select.value, viewRevision, true); });
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    clearQr();
+  } else {
+    const entry = loginEntries.get(select.value);
+    if (entry?.allowed && !entry.started) void beginLogin(select.value, viewRevision);
+    else void pollLogin();
+  }
 });
 new ResizeObserver(renderChart).observe(chart);
 try {
   await bridge.ready();
   setInterval(() => { if (!document.hidden) checkConnection(); }, 30000);
+  setInterval(pollLogin, 2000);
   await checkConnection();
 } catch {
   render("failed", null, "检测请求失败，请确认 AstrBot 登录有效后重试");

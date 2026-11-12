@@ -39,6 +39,14 @@
         <time id="updated-at">尚未刷新</time>
       </section>
       <p id="failure-reason" class="notice error" role="alert" hidden></p>
+      <section id="login-panel" class="login-card" aria-labelledby="login-title" hidden>
+        <div>
+          <h2 id="login-title">微信扫码登录</h2>
+          <p id="login-status" role="status" aria-live="polite">正在准备登录…</p>
+          <button id="login-retry" type="button" hidden>重新获取二维码</button>
+        </div>
+        <img id="login-qr" alt="请使用手机微信扫描此登录二维码" width="220" height="220" hidden />
+      </section>
       <dl class="metrics" aria-label="消息统计">
         <div class="metric">
           <dt>今日接收</dt>

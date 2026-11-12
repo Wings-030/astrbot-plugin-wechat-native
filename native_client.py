@@ -33,6 +33,8 @@ from .config import (
 from .state import cursor_number
 
 _SAFE_CODES = {
+    "operation_in_progress",
+    "login_challenge_superseded",
     "event_cursor_expired",
     "invalid_cursor",
     "unauthorized",
@@ -755,7 +757,7 @@ class NativeClient:
             code = default_code
         raise NativeAPIError(response.status, code)
 
-    async def _request(self, method: str, path: str, **kwargs) -> dict:
+    async def _request(self, method: str, path: str, *, expected_status=None, **kwargs) -> dict:
         if self.closed:
             raise NativeAPIError(0)
         try:
@@ -763,6 +765,8 @@ class NativeClient:
                 method, self.api_url + path, allow_redirects=False, **kwargs
             ) as response:
                 await self._raise_for_status(response)
+                if expected_status is not None and response.status != expected_status:
+                    raise NativeAPIError(502)
                 return await self._read_json(response)
         except (aiohttp.ClientError, TimeoutError, OSError):
             raise NativeAPIError(0, "timeout") from None
@@ -775,6 +779,80 @@ class NativeClient:
 
     async def account(self):
         return await self._request("GET", self.prefix)
+
+    def _login_operation(self, value, operation_id=None):
+        result = value.get("result")
+        if (
+            not isinstance(value.get("id"), str) or not value["id"]
+            or (operation_id is not None and value["id"] != operation_id)
+            or value.get("accountId") != self.account_id or value.get("kind") != "login"
+            or not isinstance(value.get("state"), str)
+            or value.get("state") not in {
+                "starting", "resuming", "authenticating",
+                "queued", "running", "awaiting_scan", "awaiting_approval", "succeeded",
+                "expired", "failed", "rejected", "cancelled", "needs_login", "needs_review",
+            }
+            or not isinstance(value.get("createdAt"), str)
+            or not isinstance(value.get("updatedAt"), str)
+            or not isinstance(result, dict)
+            or type(result.get("qrAvailable", False)) is not bool
+        ):
+            raise NativeAPIError(502)
+        generation = result.get("qrGeneration")
+        if generation is not None and (type(generation) is not int or generation < 0):
+            raise NativeAPIError(502)
+        if result.get("qrAvailable") and (generation is None or generation < 1):
+            raise NativeAPIError(502)
+        return value
+
+    async def start_login(self, key):
+        value = await self._request(
+            "POST", self.prefix + "/login-attempts", expected_status=202,
+            headers={"Idempotency-Key": key}, json={
+                "strategy": "auto", "allowQr": True, "forceQr": False, "timeoutSeconds": 900,
+                "qrRefresh": {"mode": "auto", "maxRefreshes": 3},
+            },
+        )
+        return self._login_operation(value)
+
+    async def login_status(self, operation_id):
+        value = await self._request(
+            "GET", self.prefix + "/login-attempts/" + quote(operation_id, safe=""),
+            expected_status=200,
+        )
+        return self._login_operation(value, operation_id)
+
+    async def login_qr(self, operation_id, generation):
+        if type(generation) is not int or generation < 1 or self.closed:
+            raise NativeAPIError(502)
+        try:
+            async with self._session.get(
+                self.api_url + self.prefix + "/login-attempts/"
+                + quote(operation_id, safe="") + "/qr",
+                params={"generation": str(generation)}, allow_redirects=False,
+            ) as response:
+                await self._raise_for_status(response)
+                if response.status != 200 or response.content_type != "image/png":
+                    raise NativeAPIError(502)
+                data = bytearray()
+                async for part in response.content.iter_chunked(16384):
+                    data.extend(part)
+                    if len(data) > 1024 * 1024:
+                        raise NativeAPIError(502)
+                if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+                    raise NativeAPIError(502)
+                from PIL import Image
+
+                try:
+                    with Image.open(io.BytesIO(data)) as image:
+                        if image.format != "PNG" or max(image.size) > 4096:
+                            raise ValueError
+                        image.verify()
+                except (OSError, ValueError, SyntaxError, Image.DecompressionBombError):
+                    raise NativeAPIError(502) from None
+                return bytes(data)
+        except (aiohttp.ClientError, TimeoutError, OSError):
+            raise NativeAPIError(0, "timeout") from None
 
     async def message(self, message_id: str):
         return await self._request("GET", self.prefix + "/messages/" + quote(message_id, safe=""))

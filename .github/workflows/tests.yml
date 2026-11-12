@@ -30,3 +30,4 @@ jobs:
         run: >-
           python -m compileall -q main.py adapter.py config.py event.py native_client.py state.py
           connection_view.py loop_guard.py tool_support.py history_tools.py wechat_actions.py
+          connection_probe.py login_session.py connection_monitor.py alert_binding.py alert_sender.py

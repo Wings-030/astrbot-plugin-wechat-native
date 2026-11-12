@@ -8,7 +8,10 @@ from astrbot.api.star import Context, Star
 from astrbot.core.agent.message import TextPart
 
 from .adapter import WeChatNativeAdapter  # noqa: F401
+from .alert_binding import AlertBindingService
+from .alert_sender import AlertSender
 from .config import PLUGIN_ID
+from .connection_monitor import ConnectionMonitor
 from .connection_view import ConnectionView
 from .event import PDF_CONTEXT_MARKER, WeChatNativeEvent, pdf_context_text
 from .group_ranking import (
@@ -20,6 +23,7 @@ from .group_ranking import (
     parse_analysis,
 )
 from .history_tools import run_read
+from .login_session import LoginSessionManager
 from .mention_tools import run_mention
 from .summary import SUMMARY_SYSTEM_PROMPT, summary_prompt
 from .tool_support import ToolError, is_native_event
@@ -137,7 +141,13 @@ class WeChatNativePlugin(Star):
         super().__init__(context)
         self._summary_running = set()
         self._ranking_running = set()
-        view = ConnectionView(context)
+        self.alert_bindings = AlertBindingService(context, self)
+        self.connection_monitor = ConnectionMonitor(
+            context, self, self.alert_bindings, AlertSender(context)
+        )
+        self.alert_bindings.monitor = self.connection_monitor
+        self.login_sessions = LoginSessionManager(self)
+        view = ConnectionView(context, self.login_sessions)
         context.register_web_api(
             f"/{PLUGIN_ID}/connection/bots", view.bots, ["GET"], "列出微信机器人"
         )
@@ -147,6 +157,48 @@ class WeChatNativePlugin(Star):
         context.register_web_api(
             f"/{PLUGIN_ID}/connection/panel", view.panel, ["GET"], "读取微信面板统计"
         )
+        for route, handler, method in (
+            ("start", view.login_start, "POST"),
+            ("status", view.login_status, "GET"),
+            ("qr", view.login_qr, "GET"),
+        ):
+            context.register_web_api(
+                f"/{PLUGIN_ID}/connection/login/{route}", handler, [method], "管理员微信登录"
+            )
+
+    async def initialize(self):
+        self.connection_monitor.start()
+
+    async def terminate(self):
+        await self.connection_monitor.stop()
+
+    @filter.command("bind_alert", alias={"绑定通知"})
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def bind_alert(self, event: AstrMessageEvent, bot_id: str = ""):
+        """在管理员私聊中绑定 Native 连接通知。"""
+        yield event.plain_result(await self.alert_bindings.execute("bind", event, bot_id))
+        event.stop_event()
+
+    @filter.command("unbind_alert", alias={"解绑通知"})
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def unbind_alert(self, event: AstrMessageEvent, bot_id: str = ""):
+        """移除指定 Native 机器人的通知绑定。"""
+        yield event.plain_result(await self.alert_bindings.execute("unbind", event, bot_id))
+        event.stop_event()
+
+    @filter.command("alert_status", alias={"通知状态"})
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def alert_status(self, event: AstrMessageEvent, bot_id: str = ""):
+        """查看 Native 连接健康与通知尝试状态。"""
+        yield event.plain_result(await self.alert_bindings.execute("status", event, bot_id))
+        event.stop_event()
+
+    @filter.command("test_alert", alias={"测试通知"})
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def test_alert(self, event: AstrMessageEvent, bot_id: str = ""):
+        """向已绑定私聊显式尝试发送一次测试通知。"""
+        yield event.plain_result(await self.alert_bindings.execute("test", event, bot_id))
+        event.stop_event()
 
     @filter.on_llm_request()
     async def attach_pdf_text(self, event: AstrMessageEvent, req: ProviderRequest):

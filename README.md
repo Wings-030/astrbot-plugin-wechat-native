@@ -3,7 +3,7 @@
 让 AstrBot 接入个人微信，在私聊和群聊中使用模型、语音与插件能力。
 插件通过 **agent-wechat-native /v1 API** 连接微信，运行于 AstrBot 内，无需额外 Bridge 服务。
 
-**适配版本：** AstrBot `>=4.29.3,<5` · Native `v1.5.1` · Python `3.12+`
+**适配版本：** AstrBot `>=4.29.3,<5` · Native `v2.3.0` · Python `3.12+`
 
 [功能概览](#功能概览) · [安装与配置](#安装与配置) · [Docker 部署](#docker-部署同一台-linux-主机) · [常见问题](#常见问题) · [详细用法](docs/features.md)
 
@@ -24,6 +24,36 @@
 查看[谁最能聊](docs/features.md#谁最能聊)、[群聊摘要](docs/features.md#群聊摘要)、[聊天工具及权限](docs/features.md#当前聊天工具native-v151)与[循环保护](docs/features.md#自动回复循环保护)。
 
 图示源文件：[消息链路](docs/wechat-native-messages.html) · [群聊与保障](docs/wechat-native-capabilities.html)。
+
+### 面板扫码登录与跨平台断线通知
+
+在插件管理中打开现有 **WeChat Native 面板**，选择已启用的 Native 机器人。
+服务可访问且账号未认证时，面板会启动或恢复登录任务，显示 Native 原始二维码；
+扫码后按手机提示确认。任务过期或失败后，点击“重新获取二维码”手动重试。
+已认证但暂时重连的账号不会强制重新扫码。登录需要 Dashboard 管理账号及可读取的
+`admin_token_file`，普通连接检测仍使用 `token_file`，无需新增 Secret。
+
+在已经接入 AstrBot 的 Telegram、QQ OneBot、LINE、`weixin_oc` 等平台的**管理员私聊**中操作：
+
+| 中文指令 | 英文指令 | 用途 |
+| --- | --- | --- |
+| `/绑定通知 [native_bot_id]` | `/bind_alert [native_bot_id]` | 将当前私聊绑定为该 Native 机器人的通知目标 |
+| `/解绑通知 [native_bot_id]` | `/unbind_alert [native_bot_id]` | 移除绑定，保留事故状态 |
+| `/通知状态 [native_bot_id]` | `/alert_status [native_bot_id]` | 查询最近监测健康、绑定渠道与通知尝试结果 |
+| `/测试通知 [native_bot_id]` | `/test_alert [native_bot_id]` | 显式尝试一次测试发送，不改变监控状态 |
+
+只有一个启用的 Native 机器人时可以省略 ID；有多个时必须填写，省略会列出候选 ID。
+每个 Native 机器人最多绑定一个私聊，重复绑定可覆盖目标。在哪个平台私聊绑定，就向该私聊通知；
+群聊及非管理员不能操作，也不能输入其他人的会话标识来绑定。
+
+后台每 60 秒执行只读检测，与面板是否打开无关。连续 3 次异常进入事故，连续 2 次在线判定恢复。
+每次事故最多尝试一次断线通知和一次恢复通知，重启保留状态；发送失败不会自动重试。
+没有绑定也监控，但不会发送；后来绑定不会补发已经发生的事件。AstrBot 停机期间无法检测。
+通知通过 AstrBot 公共发送接口路由，调用成功不保证最终送达。`weixin_oc` 需要有效上下文，
+QQ、LINE 等平台可能限制主动消息；首次使用请运行 `/测试通知` 并在接收端确认。
+
+详见[登录与通知运维说明](docs/operations.md#面板扫码登录与跨平台告警native-v230)
+及[自动化验证与真实账号验收](docs/verification-v2.3.0.md)。
 
 ## 安装与配置
 
@@ -97,13 +127,14 @@ AstrBot 的模型开关、全局白名单和插件权限仍需正确配置。
 | `enable_history_tools` | `false` | 开启历史搜索、最近消息、群资料及成员查询 |
 | `enable_wechat_actions` | `false` | 开启自身群昵称、群改名及自身消息撤回 |
 | `wechat_action_admins` | `[]` | 可改群名/撤回消息的真实 `senderId`；空列表不授权任何人 |
-| `admin_token_file` | `/run/secrets/wechat-admin-token` | 独立管理凭据文件；群昵称和群改名使用此凭据 |
+| `admin_token_file` | `/run/secrets/wechat-admin-token` | 既有管理凭据文件；面板扫码登录、群昵称和群改名使用此凭据 |
 
 群昵称/群改名需要单独配置 `admin_token_file`，且 Native Token 具有目标账号的 `admin` scope。
 按下方 Docker 示例填写 `/run/secrets/wechat-admin-token`，文件创建、签发及挂载见[管理 Token 步骤](#签发并保存管理-token)。
 未配置时这两项返回“权限配置尚未准备好”，不会把原有 read/send Token 升级或用于群管理。
 撤回使用原有 read/send 凭据，读工具关闭不影响已授权撤回所需的内部目标读取。
-只在写功能开启时初始化管理客户端；凭据文件必须挂载到 AstrBot 容器内，勿将 Token 写入版本库。
+管理工具仅在写功能开启时初始化客户端；面板登录按需读取同一管理凭据。
+凭据文件必须挂载到 AstrBot 容器内，勿将 Token 写入版本库。
 
 8 个工具的示例、授权范围与回执处理见[当前聊天工具](docs/features.md#当前聊天工具native-v151)。
 这些新增工具尚未使用真实微信账号验证，当前验证使用模拟 Native HTTP 和真实 AstrBot SDK。
@@ -213,7 +244,7 @@ services:
         max-file: "3"
 
   agent-wechat:
-    image: ghcr.io/thisnick/agent-wechat-native:v1.5.1
+    image: ghcr.io/thisnick/agent-wechat-native:v2.3.0
     container_name: agent-wechat
     restart: unless-stopped
     network_mode: host
