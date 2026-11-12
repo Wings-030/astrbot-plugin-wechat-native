@@ -194,8 +194,13 @@ async def test_native_malformed_state_raises_safe_transport_error(serve):
 
 
 async def login_server(serve, tmp_path, *, authenticated=False, lost=False):
-    state = {"posts": [], "bodies": [], "gets": 0,
-             "operation": operation(), "authenticated": authenticated}
+    state = {
+        "posts": [],
+        "bodies": [],
+        "gets": 0,
+        "operation": operation(),
+        "authenticated": authenticated,
+    }
     token_file = tmp_path / "admin"
     token_file.write_text("synthetic-admin-token")
 
@@ -554,7 +559,10 @@ async def test_explicit_qr_retry_bypasses_failed_saved_login(serve, tmp_path):
     assert state["bodies"][0]["strategy"] == "auto"
     assert state["bodies"][0]["forceQr"] is False
     assert state["bodies"][1] == {
-        "strategy": "qr", "allowQr": True, "forceQr": True, "timeoutSeconds": 900,
+        "strategy": "qr",
+        "allowQr": True,
+        "forceQr": True,
+        "timeoutSeconds": 900,
         "qrRefresh": {"mode": "auto", "maxRefreshes": 3},
     }
     assert len(set(state["posts"])) == 2

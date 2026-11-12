@@ -201,7 +201,8 @@ class LoginSessionManager:
                     force_qr = record.get("force_qr", False)
                     logger.info(
                         "Native 登录诊断：stage=start event=request retry=%s force_qr=%s",
-                        retry, force_qr,
+                        retry,
+                        force_qr,
                     )
                     value = await client.start_login(record["idempotency_key"], force_qr=force_qr)
                     self._log_operation(value, "start")
