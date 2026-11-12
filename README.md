@@ -308,7 +308,7 @@ docker compose exec agent-wechat wx --server-name local accounts list
 ```
 
 记下返回的账号 `id`。如需使用已有官方微信资料，按
-[Native 登录说明](https://github.com/thisnick/agent-wechat/blob/v1.3.3/docs/src/content/docs/setup/connect.mdx)
+[Native 登录说明](https://github.com/thisnick/agent-wechat/blob/v2.3.0/docs/src/content/docs/setup/connect.mdx)
 挂载资料目录；使用期间保持官方客户端关闭。
 
 #### 签发并保存管理 Token
@@ -355,7 +355,7 @@ sudo chmod 600 /opt/agent-wechat-native/admin-token
 docker compose exec agent-wechat wx --server-name local tokens list
 ```
 
-各项功能需要的 scopes 如下，依据 [Native v1.5.1 Token 文档](https://github.com/thisnick/agent-wechat/blob/v1.5.1/docs/src/content/docs/reference/tokens.mdx)：
+各项功能需要的 scopes 如下，依据 [Native v2.3.0 Token 文档](https://github.com/thisnick/agent-wechat/blob/v2.3.0/docs/src/content/docs/reference/tokens.mdx)：
 
 | 凭据或功能 | 所需 scopes |
 |---|---|
@@ -369,7 +369,7 @@ docker compose exec agent-wechat wx --server-name local tokens list
 
 为日常机器人另行签发受限 Token 时，使用 `--scopes read --scopes send --scopes media`。
 本部署最初生成的 `api-token` 是 `server.toml` 配置的 owner 凭据，已覆盖这些权限；不要覆盖它来改 scope。
-上面的 `admin-token` 是独立签发的凭据。[Native v1.5.1 的 scope 检查](https://github.com/thisnick/agent-wechat/blob/v1.5.1/packages/native-client-rust/crates/wechat-api/src/lib.rs#L89-L97)允许 `admin` 通过其他 scope 的检查，
+上面的 `admin-token` 是独立签发的凭据。[Native v2.3.0 的 scope 检查](https://github.com/thisnick/agent-wechat/blob/v2.3.0/packages/native-client-rust/crates/wechat-api/src/lib.rs#L98-L108)允许 `admin` 通过其他 scope 的检查，
 所以管理 Token 不必再叠加 `read`、`send` 或 `media`。插件仍将日常与群管理请求交给各自客户端。
 
 如果是在已有部署中补充管理文件和挂载，执行以下命令应用 Compose 修改，并确认 AstrBot 可读到非空文件。
@@ -473,8 +473,8 @@ ruff format --check .
 使用 Python 3.12 虚拟环境；生产安装由 AstrBot 处理 `requirements.txt`，无需安装开发依赖。
 
 - [AstrBot Docker 部署](https://docs.astrbot.app/deploy/astrbot/docker.html)
-- [Native Docker 部署](https://github.com/thisnick/agent-wechat/tree/v1.5.1/deploy/native)
-- [Native v1.5.1 API](https://github.com/thisnick/agent-wechat/blob/v1.5.1/docs/src/content/docs/use/api.mdx)
+- [Native Docker 部署](https://github.com/thisnick/agent-wechat/tree/v2.3.0/deploy/native)
+- [Native v2.3.0 API](https://github.com/thisnick/agent-wechat/blob/v2.3.0/docs/src/content/docs/use/api.mdx)
 
 本插件采用 [MIT 许可证](LICENSE)。仅接入有权操作的微信账号。
 
