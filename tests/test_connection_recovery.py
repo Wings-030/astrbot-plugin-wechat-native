@@ -439,8 +439,12 @@ async def test_login_conflict_reuses_original_key_without_cancelling_unknown_tas
 async def test_failed_login_logs_native_code_without_sensitive_result(serve, tmp_path, caplog):
     bot, state = await login_server(serve, tmp_path)
     state["operation"] = operation(
-        "failed", result={"code": "profile_network_routing_unavailable",
-                          "message": "SENSITIVE PROFILE PATH AND TOKEN", "qr": "PRIVATE QR"},
+        "failed",
+        result={
+            "code": "profile_network_routing_unavailable",
+            "message": "SENSITIVE PROFILE PATH AND TOKEN",
+            "qr": "PRIVATE QR",
+        },
     )
     manager = module("login_session").LoginSessionManager(state["kv"])
     result = await manager.start(bot)
@@ -460,7 +464,9 @@ async def test_login_diagnostics_redact_unknown_native_codes(serve, tmp_path, ca
     assert "SENSITIVE" not in caplog.text and "PRIVATE BODY" not in caplog.text
 
 
-async def test_login_status_logs_failure_transition_once_without_poll_noise(serve, tmp_path, caplog):
+async def test_login_status_logs_failure_transition_once_without_poll_noise(
+    serve, tmp_path, caplog
+):
     bot, state = await login_server(serve, tmp_path)
     manager = module("login_session").LoginSessionManager(state["kv"])
     await manager.start(bot)
@@ -473,13 +479,21 @@ async def test_login_status_logs_failure_transition_once_without_poll_noise(serv
     assert state["gets"] == 1
 
 
-@pytest.mark.parametrize("stage,status,code", [
-    ("start", 403, "insufficient_scope"),
-    ("status", 503, "timeout"),
-    ("qr", 409, "login_challenge_superseded"),
-])
+@pytest.mark.parametrize(
+    "stage,status,code",
+    [
+        ("start", 403, "insufficient_scope"),
+        ("status", 503, "timeout"),
+        ("qr", 409, "login_challenge_superseded"),
+    ],
+)
 async def test_login_http_diagnostics_identify_failed_stage(
-    serve, tmp_path, caplog, stage, status, code,
+    serve,
+    tmp_path,
+    caplog,
+    stage,
+    status,
+    code,
 ):
     bot, state = await login_server(serve, tmp_path)
     login = module("login_session")
@@ -499,12 +513,15 @@ async def test_login_http_diagnostics_identify_failed_stage(
     assert "synthetic-admin-token" not in caplog.text
 
 
-@pytest.mark.parametrize("body,mime,reason", [
-    (b"not png", "text/html", "invalid_content_type"),
-    (b"not png", "image/png", "invalid_signature"),
-    (b"x" * (1024 * 1024 + 1), "image/png", "size_limit"),
-    (b"\x89PNG\r\n\x1a\nSENSITIVE", "image/png", "invalid_png"),
-])
+@pytest.mark.parametrize(
+    "body,mime,reason",
+    [
+        (b"not png", "text/html", "invalid_content_type"),
+        (b"not png", "image/png", "invalid_signature"),
+        (b"x" * (1024 * 1024 + 1), "image/png", "size_limit"),
+        (b"\x89PNG\r\n\x1a\nSENSITIVE", "image/png", "invalid_png"),
+    ],
+)
 async def test_qr_validation_diagnostics_do_not_log_image_bytes(serve, caplog, body, mime, reason):
     async def handler(req):
         return web.Response(body=body, content_type=mime)

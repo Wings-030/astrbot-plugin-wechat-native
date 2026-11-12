@@ -32,12 +32,24 @@ ACTIVE_STATES = {
     "awaiting_approval",
 }
 SAFE_LOGIN_FAILURE_CODES = {
-    "login_failed", "auth_required", "login_poll_failed", "login_lan_challenge_failed",
-    "account_identity_mismatch", "account_database_password_mismatch", "account_device_mismatch",
-    "profile_identity_unavailable", "profile_database_password_required",
-    "profile_saved_key_info_unavailable", "profile_network_routing_unavailable",
-    "profile_keys_unavailable", "profile_database_unavailable", "profile_changed_during_login",
-    "profile_resource_limit", "profile_cipher_unavailable", "profile_io_failed", "profile_unavailable",
+    "login_failed",
+    "auth_required",
+    "login_poll_failed",
+    "login_lan_challenge_failed",
+    "account_identity_mismatch",
+    "account_database_password_mismatch",
+    "account_device_mismatch",
+    "profile_identity_unavailable",
+    "profile_database_password_required",
+    "profile_saved_key_info_unavailable",
+    "profile_network_routing_unavailable",
+    "profile_keys_unavailable",
+    "profile_database_unavailable",
+    "profile_changed_during_login",
+    "profile_resource_limit",
+    "profile_cipher_unavailable",
+    "profile_io_failed",
+    "profile_unavailable",
 }
 
 
@@ -118,7 +130,10 @@ class LoginSessionManager:
         elif state != previous_state:
             logger.info(
                 "Native 登录诊断：stage=%s state=%s qr_available=%s qr_generation=%s",
-                stage, state, result.get("qrAvailable", False), result.get("qrGeneration"),
+                stage,
+                state,
+                result.get("qrAvailable", False),
+                result.get("qrGeneration"),
             )
 
     async def _fetch(self, client, key, record):
@@ -135,9 +150,7 @@ class LoginSessionManager:
 
     @staticmethod
     def _native_error(error, stage):
-        logger.warning(
-            "Native 登录诊断：stage=%s http=%s code=%s", stage, error.status, error.code
-        )
+        logger.warning("Native 登录诊断：stage=%s http=%s code=%s", stage, error.status, error.code)
         if error.status in (401, 403):
             return LoginError("Admin Token 无权登录该账号，请检查授权", 403)
         if error.status == 409:
@@ -155,7 +168,9 @@ class LoginSessionManager:
                 if health.auth_state != "unauthenticated" or health.health != "offline":
                     logger.warning(
                         "Native 登录诊断：stage=probe health=%s auth_state=%s reason=%s",
-                        health.health, health.auth_state, health.reason,
+                        health.health,
+                        health.auth_state,
+                        health.reason,
                     )
                     raise LoginError("当前账号无需扫码，或 Native 服务不可用", 409)
                 stage = "admin_token"
@@ -202,7 +217,8 @@ class LoginSessionManager:
             except Exception as error:
                 logger.warning(
                     "Native 登录诊断：stage=%s reason=unexpected_error error_type=%s",
-                    stage, type(error).__name__,
+                    stage,
+                    type(error).__name__,
                 )
                 raise LoginError("登录存储不可用，请稍后重试", 503) from None
 
@@ -255,7 +271,8 @@ class LoginSessionManager:
                     image = await client.login_qr(record["operation_id"], generation)
                     logger.info(
                         "Native 登录诊断：stage=qr event=received generation=%s bytes=%s",
-                        generation, len(image),
+                        generation,
+                        len(image),
                     )
                 return {
                     "image": "data:image/png;base64," + base64.b64encode(image).decode("ascii"),
@@ -268,6 +285,7 @@ class LoginSessionManager:
             except Exception as error:
                 logger.warning(
                     "Native 登录诊断：stage=%s reason=unexpected_error error_type=%s",
-                    stage, type(error).__name__,
+                    stage,
+                    type(error).__name__,
                 )
                 raise LoginError("二维码读取失败，请稍后重试", 503) from None
