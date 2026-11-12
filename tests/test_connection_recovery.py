@@ -194,7 +194,8 @@ async def test_native_malformed_state_raises_safe_transport_error(serve):
 
 
 async def login_server(serve, tmp_path, *, authenticated=False, lost=False):
-    state = {"posts": [], "gets": 0, "operation": operation(), "authenticated": authenticated}
+    state = {"posts": [], "bodies": [], "gets": 0,
+             "operation": operation(), "authenticated": authenticated}
     token_file = tmp_path / "admin"
     token_file.write_text("synthetic-admin-token")
 
@@ -216,6 +217,7 @@ async def login_server(serve, tmp_path, *, authenticated=False, lost=False):
         if req.method == "POST":
             key = req.headers["Idempotency-Key"]
             state["posts"].append(key)
+            state["bodies"].append(await req.json())
             assert any(v.get("idempotency_key") == key for v in state["kv"].data.values())
             if lost and len(state["posts"]) == 1:
                 return web.Response(text="lost response", status=502)
@@ -532,3 +534,85 @@ async def test_qr_validation_diagnostics_do_not_log_image_bytes(serve, caplog, b
             await client.login_qr("op-1", 1)
     assert f"stage=qr reason={reason}" in caplog.text
     assert "SENSITIVE" not in caplog.text and "not png" not in caplog.text
+
+
+async def test_explicit_qr_retry_bypasses_failed_saved_login(serve, tmp_path):
+    bot, state = await login_server(serve, tmp_path)
+    login = module("login_session")
+    manager = login.LoginSessionManager(state["kv"])
+    state["operation"] = operation("starting", result={})
+    assert (await manager.start(bot))["state"] == "starting"
+    state["operation"] = operation("resuming", result={"method": "active"})
+    assert (await manager.status(bot))["state"] == "resuming"
+    state["operation"] = operation("failed", result={"code": "login_failed"})
+    assert (await manager.status(bot))["state"] == "failed"
+    assert (await manager.start(bot))["state"] == "failed"
+    assert len(state["posts"]) == 1
+
+    state["operation"] = operation(id="op-qr")
+    assert (await manager.start(bot, retry=True))["state"] == "awaiting_scan"
+    assert state["bodies"][0]["strategy"] == "auto"
+    assert state["bodies"][0]["forceQr"] is False
+    assert state["bodies"][1] == {
+        "strategy": "qr", "allowQr": True, "forceQr": True, "timeoutSeconds": 900,
+        "qrRefresh": {"mode": "auto", "maxRefreshes": 3},
+    }
+    assert len(set(state["posts"])) == 2
+    assert (await manager.qr(bot, 1))["image"].startswith("data:image/png;base64,")
+
+
+async def test_uncertain_qr_post_keeps_strategy_and_key_after_restart(serve, tmp_path):
+    bot, state = await login_server(serve, tmp_path, lost=True)
+    login = module("login_session")
+    with pytest.raises(login.LoginError):
+        await login.LoginSessionManager(state["kv"]).start(bot, retry=True)
+    assert (await login.LoginSessionManager(state["kv"]).start(bot))["state"] == "awaiting_scan"
+    assert len(state["posts"]) == 2 and len(set(state["posts"])) == 1
+    assert state["bodies"][0] == state["bodies"][1]
+    assert state["bodies"][0]["strategy"] == "qr"
+    assert state["bodies"][0]["forceQr"] is True
+
+
+async def test_manual_retry_does_not_change_uncertain_auto_request(serve, tmp_path):
+    bot, state = await login_server(serve, tmp_path, lost=True)
+    login = module("login_session")
+    with pytest.raises(login.LoginError):
+        await login.LoginSessionManager(state["kv"]).start(bot)
+    await login.LoginSessionManager(state["kv"]).start(bot, retry=True)
+    assert len(set(state["posts"])) == 1
+    assert state["bodies"][0] == state["bodies"][1]
+    assert state["bodies"][1]["strategy"] == "auto" and state["bodies"][1]["forceQr"] is False
+
+
+async def test_qr_retry_does_not_replace_active_login(serve, tmp_path):
+    bot, state = await login_server(serve, tmp_path)
+    manager = module("login_session").LoginSessionManager(state["kv"])
+    await manager.start(bot)
+    await manager.start(bot, retry=True)
+    assert len(state["posts"]) == 1
+    assert state["bodies"][0]["strategy"] == "auto"
+
+
+async def test_legacy_pending_login_without_strategy_recovers_as_auto(serve, tmp_path):
+    bot, state = await login_server(serve, tmp_path, lost=True)
+    login = module("login_session")
+    with pytest.raises(login.LoginError):
+        await login.LoginSessionManager(state["kv"]).start(bot)
+    for record in state["kv"].data.values():
+        record.pop("force_qr", None)
+    await login.LoginSessionManager(state["kv"]).start(bot, retry=True)
+    assert len(set(state["posts"])) == 1
+    assert state["bodies"][0] == state["bodies"][1]
+
+
+@pytest.mark.parametrize("value", ["true", 1, None])
+async def test_corrupt_persisted_login_strategy_cannot_reach_native(serve, tmp_path, value):
+    bot, state = await login_server(serve, tmp_path)
+    login = module("login_session")
+    manager = login.LoginSessionManager(state["kv"])
+    await manager.start(bot)
+    for record in state["kv"].data.values():
+        record["force_qr"] = value
+    with pytest.raises(login.LoginError):
+        await login.LoginSessionManager(state["kv"]).start(bot, retry=True)
+    assert len(state["posts"]) == 1 and state["gets"] == 0

@@ -88,6 +88,7 @@ class LoginSessionManager:
             or not isinstance(value.get("idempotency_key"), str)
             or not value["idempotency_key"]
             or not isinstance(value.get("created_at"), str)
+            or type(value.get("force_qr", False)) is not bool
             or value.get("state") not in ACTIVE_STATES | TERMINAL_STATES
             or (
                 value.get("operation_id") is not None
@@ -191,13 +192,18 @@ class LoginSessionManager:
                             "operation_id": None,
                             "created_at": datetime.now(timezone.utc).isoformat(),
                             "state": "pending",
+                            "force_qr": retry,
                         }
                     # Persist even on retries: a failed earlier write must never reach Native.
                     stage = "session_save"
                     await self.kv.put_kv_data(key, record)
                     stage = "start"
-                    logger.info("Native 登录诊断：stage=start event=request retry=%s", retry)
-                    value = await client.start_login(record["idempotency_key"])
+                    force_qr = record.get("force_qr", False)
+                    logger.info(
+                        "Native 登录诊断：stage=start event=request retry=%s force_qr=%s",
+                        retry, force_qr,
+                    )
+                    value = await client.start_login(record["idempotency_key"], force_qr=force_qr)
                     self._log_operation(value, "start")
                     record = {**record, "operation_id": value["id"], "state": value["state"]}
                     stage = "session_save"

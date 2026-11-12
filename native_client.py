@@ -808,11 +808,12 @@ class NativeClient:
             raise NativeAPIError(502)
         return value
 
-    async def start_login(self, key):
+    async def start_login(self, key, *, force_qr=False):
         value = await self._request(
             "POST", self.prefix + "/login-attempts", expected_status=202,
             headers={"Idempotency-Key": key}, json={
-                "strategy": "auto", "allowQr": True, "forceQr": False, "timeoutSeconds": 900,
+                "strategy": "qr" if force_qr else "auto",
+                "allowQr": True, "forceQr": force_qr, "timeoutSeconds": 900,
                 "qrRefresh": {"mode": "auto", "maxRefreshes": 3},
             },
         )

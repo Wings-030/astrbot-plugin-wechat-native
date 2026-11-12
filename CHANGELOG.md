@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Make explicit QR retries bypass saved-session recovery; persist the request strategy with its idempotency key across timeouts and restarts.
 - Add redacted, stage-specific QR login diagnostics for Native operation failures, HTTP errors and PNG validation; retain existing login and retry behavior.
 - Add Native v2.3.0 QR login to the existing connection panel, using the existing Admin Token, durable idempotency and validated in-memory PNG transfer.
 - Add administrator private-chat alert commands with Chinese aliases and platform-neutral routing through AstrBot.

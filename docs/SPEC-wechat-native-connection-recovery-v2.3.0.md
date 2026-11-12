@@ -104,7 +104,7 @@
 | 获取二维码 | `GET /accounts/{accountId}/login-attempts/{operationId}/qr?generation=N` | `login` | Native PNG 原图，带代次；不得缓存 |
 | 取消任务 | `POST /accounts/{accountId}/login-attempts/{operationId}/cancel` | 登录任务需 `login` | 本版无需暴露给 UI，保留可扩展性 |
 
-固定请求体：
+默认请求体（面板首次进入）：
 
 ```json
 {
@@ -117,6 +117,10 @@
 ```
 
 `strategy=auto`：优先使用已有设备登录能力，仅在需要扫码时显示二维码。二维码来自 Native 返回的 `image/png`，不得自行由文字/ASCII/base64 payload 重新编码成二维码。Native `Operation` 至少涉及 `id`、`accountId`、`kind`、`state`、`result`、时间信息；`result.qrAvailable`、`result.qrGeneration` 需按实际类型严格解析。
+
+**2026-11-12 用户确认的修订：** 用户显式点击“重新获取二维码”且需要创建新任务时，
+使用 `strategy=qr`、`forceQr=true`，其余请求字段保持一致，跳过失败的旧会话恢复。
+活跃任务或结果不确定的请求继续复用原任务、原幂等 Key 与原策略；不自动切换策略或重复创建。
 
 **兼容限制：** v2.3.0 还提供 `/auth/login`、`/operations/{id}`，但本功能统一走 `/login-attempts` 路由族，不混用两套前端契约；如果未来改版，先变更契约测试。
 
@@ -171,7 +175,7 @@
 ### 5.3 Login Session 幂等
 
 - 后端每个 `bot_id + canonical api_url + account_id` 仅保留一个活跃登录任务；使用 per-bot `asyncio.Lock` 防止面板重复打开或双击发起多次 POST。
-- 插件 KV 持久化 `idempotency_key`、`operation_id`、创建时间、任务标识和终态；**先提交幂等 Key 再调用 Native POST**。请求超时或响应丢失时复用原 Key，不得产生新的登录任务。
+- 插件 KV 持久化 `idempotency_key`、`operation_id`、创建时间、任务标识、`force_qr` 策略和终态；**先提交幂等 Key 与策略再调用 Native POST**。请求超时或响应丢失时复用原 Key 及原策略，不得产生新的登录任务。旧记录缺少 `force_qr` 时按 `false` 恢复。
 - 若 KV 已有有效 `operation_id`，先查询任务状态；刷新、浏览器重开、AstrBot 重启均恢复已有任务。
 - 任务为终态后仅在用户显式要求“重新获取二维码”时创建新的幂等 Key；Native 报 `409 operation_in_progress` 时不要盲目重建或取消未知任务。
 - 原有 `admin_token_file`（默认 `/run/secrets/wechat-admin-token`）拥有目标账号 `admin` 权限，可调用 Native 的 `login` scope 路由；普通 `token_file` 继续用于读状态与消息链路。**不得添加第三个 Token/Secret 或用普通 Token 越权兜底**。
