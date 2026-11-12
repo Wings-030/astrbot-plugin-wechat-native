@@ -7,11 +7,10 @@ state and reports outages through an already-configured AstrBot platform
 
 import asyncio
 import json
-import smtplib
-import ssl
+import os
+import tempfile
 import time
-from dataclasses import dataclass
-from email.message import EmailMessage
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from astrbot.api.event import MessageChain
@@ -19,22 +18,28 @@ from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, StarTools
 
 from .config import PLUGIN_ID
-from .login_qr import create_login_qr
+from .email_notify import send_email
+from .login_qr import LoginQRSession, create_login_qr, login_qr_file
 from .native_client import NativeAPIError
+from .notify_targets import (
+    account_is_online,
+    active_platforms,
+    best_weixin_umo,
+    is_weixin_private_umo,
+)
 
 POLL_SECONDS = 30
-NOTIFY_TYPE = "weixin_oc"
 STATE_FILE = "offline_notify_state.json"
 
 
 @dataclass
 class _Runtime:
     last_check: float = float("-inf")
-    fail_streak: int = 0
     online: bool | None = None
     down_since: float | None = None
     last_alert_ts: float = 0.0
     qr_sent: bool = False
+    login_qr: LoginQRSession = field(default_factory=LoginQRSession)
 
 
 def _duration_text(seconds: float) -> str:
@@ -86,14 +91,14 @@ class OfflineNotifyManager:
                 await self.poll_once()
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                self.logger.warning("掉线提醒巡检异常", exc_info=True)
+            except Exception as error:
+                self.logger.warning("掉线提醒巡检异常：%s", type(error).__name__)
             await asyncio.sleep(POLL_SECONDS)
 
     async def poll_once(self) -> None:
         for adapter in self._adapters():
             config = getattr(adapter, "native_config", None)
-            if config is None or not (config.enable_offline_notify or config.enable_email_notify):
+            if config is None or not (config.offline_notify.enabled or config.email.enabled):
                 continue
             platform_id = adapter.meta().id
             runtime = self._runtime.get(platform_id)
@@ -108,18 +113,7 @@ class OfflineNotifyManager:
             self._save_state()
 
     def _adapters(self) -> list:
-        manager = getattr(self.context, "platform_manager", None)
-        instances = getattr(manager, "platform_insts", None) or []
-        result = []
-        for instance in instances:
-            try:
-                meta = instance.meta()
-            except Exception:
-                continue
-            if meta.name != "wechat_native" or getattr(instance, "stopped", False):
-                continue
-            result.append(instance)
-        return result
+        return active_platforms(self.context, "wechat_native")
 
     async def _probe(self, adapter) -> tuple[bool, str, bool]:
         client = getattr(adapter, "client", None)
@@ -133,12 +127,11 @@ class OfflineNotifyManager:
             raise
         except Exception as error:
             return False, f"Native 接口不可达（{type(error).__name__}）", False
-        if account.get("authenticated") and account.get("connection") == "online":
+        if account_is_online(account):
             return True, "online", False
         return (
             False,
-            f"authenticated={account.get('authenticated')} "
-            f"connection={account.get('connection')}",
+            f"authenticated={account.get('authenticated')} connection={account.get('connection')}",
             not account.get("authenticated"),
         )
 
@@ -150,13 +143,12 @@ class OfflineNotifyManager:
         reason: str,
         needs_login: bool = False,
     ) -> None:
-        config = adapter.native_config
+        config = adapter.native_config.offline_notify
         now = time.time()
         if online:
-            runtime.fail_streak = 0
             if runtime.online is False:
-                downtime = now - runtime.down_since if runtime.down_since else 0.0
-                if config.offline_notify_on_recovery:
+                downtime = now - runtime.down_since if runtime.down_since is not None else 0.0
+                if config.on_recovery:
                     await self._send(
                         adapter,
                         f"微信个人号已恢复在线 {_time_text(now)}",
@@ -164,27 +156,23 @@ class OfflineNotifyManager:
                         f"时间：{_time_text(now)}\n"
                         f"掉线时长：约 {_duration_text(downtime)}",
                     )
-                runtime.down_since = None
-                runtime.last_alert_ts = 0.0
+            runtime.down_since = None
+            runtime.last_alert_ts = 0.0
             runtime.online = True
             runtime.qr_sent = False
             return
 
-        runtime.fail_streak += 1
-        down_for = runtime.fail_streak * POLL_SECONDS
-        if down_for < config.offline_notify_after_seconds:
+        if runtime.down_since is None:
+            runtime.down_since = now
+        down_for = max(0.0, now - runtime.down_since)
+        if down_for < config.after_seconds:
             return
-        went_offline = runtime.online is not False
-        if went_offline:
-            runtime.online = False
-            runtime.down_since = now - down_for
-            runtime.last_alert_ts = 0.0
-            runtime.qr_sent = False
-        if runtime.last_alert_ts:
-            repeat_hours = config.offline_notify_repeat_hours
-            if repeat_hours == 0 or now - runtime.last_alert_ts < repeat_hours * 3600:
-                return
-        if await self._send(
+        runtime.online = False
+        repeat_seconds = config.repeat_hours * 3600
+        alert_due = not runtime.last_alert_ts or (
+            repeat_seconds > 0 and now - runtime.last_alert_ts >= repeat_seconds
+        )
+        if alert_due and await self._send(
             adapter,
             f"微信个人号掉线了 {_time_text(now)}",
             "⚠️ 微信个人号掉线了\n"
@@ -194,33 +182,34 @@ class OfflineNotifyManager:
             "处理：在服务器重新扫码登录",
         ):
             runtime.last_alert_ts = now
-        if needs_login and went_offline and not runtime.qr_sent:
+        if needs_login and not runtime.qr_sent:
             runtime.qr_sent = await self._send_login_qr(adapter)
 
     async def _send_login_qr(self, adapter) -> bool:
-        config = adapter.native_config
-        if not config.enable_login_qr:
+        config = adapter.native_config.offline_notify
+        if not config.login_qr:
             return False
-        umo = self._resolve_umo(adapter)
+        umo = await self._resolve_umo(adapter)
         if not umo:
             self.logger.warning("登录二维码未发送：未找到 weixin_oc 会话")
             return False
         try:
-            path = await create_login_qr(adapter.client, self.state_path.parent)
+            data = await self.get_login_qr(adapter)
         except Exception as error:
             self.logger.warning("登录二维码生成失败：%s", type(error).__name__)
             return False
         try:
-            chain = MessageChain(
-                [
-                    Plain(
-                        "⚠️ 微信个人号掉线，请用手机微信扫码登录。"
-                        "二维码约 4 分钟内有效，过期后发送「微信二维码」重新获取。"
-                    ),
-                    Image.fromFileSystem(str(path)),
-                ]
-            )
-            found = await self.context.send_message(umo, chain)
+            with login_qr_file(data, self.state_path.parent) as path:
+                chain = MessageChain(
+                    [
+                        Plain(
+                            "⚠️ 微信个人号掉线，请用手机微信扫码登录。"
+                            "二维码约 4 分钟内有效，过期后发送「微信二维码」重新获取。"
+                        ),
+                        Image.fromFileSystem(str(path)),
+                    ]
+                )
+                found = await self.context.send_message(umo, chain)
         except Exception as error:
             self.logger.warning("登录二维码发送失败：%s", type(error).__name__)
             return False
@@ -230,56 +219,45 @@ class OfflineNotifyManager:
         self.logger.info("登录二维码已发送")
         return True
 
+    async def get_login_qr(self, adapter) -> bytes:
+        platform_id = adapter.meta().id
+        runtime = self._runtime.setdefault(platform_id, self._runtime_from_state(platform_id))
+        try:
+            return await create_login_qr(adapter.client, session=runtime.login_qr)
+        finally:
+            self._save_state()
+
+    def observe_session(self, event) -> None:
+        if event.get_platform_name() != "weixin_oc" or not event.is_private_chat():
+            return
+        self._state["umo"] = event.unified_msg_origin
+        self._save_state()
+
     async def _send(self, adapter, subject: str, text: str) -> bool:
         config = adapter.native_config
         delivered = False
-        if config.enable_offline_notify:
+        if config.offline_notify.enabled:
             delivered = await self._send_umo(adapter, text) or delivered
-        if config.enable_email_notify:
-            delivered = await self._send_email(config, subject, text) or delivered
+        if config.email.enabled:
+            delivered = await self._send_email(config.email, subject, text) or delivered
         if not delivered:
             self.logger.warning("掉线提醒没有送达任何通道")
         return delivered
 
     async def _send_email(self, config, subject: str, text: str) -> bool:
-        if not config.email_smtp_host or not config.email_to:
+        if not config.smtp_host or not config.recipients:
             self.logger.warning("邮件提醒未发送：缺少 SMTP 服务器地址或收件人")
             return False
         try:
-            await asyncio.to_thread(self._send_email_sync, config, subject, text)
+            await asyncio.to_thread(send_email, config, subject, text)
         except Exception as error:
             self.logger.warning("邮件提醒发送失败：%s", type(error).__name__)
             return False
         self.logger.info("邮件提醒已发送")
         return True
 
-    @staticmethod
-    def _send_email_sync(config, subject: str, text: str) -> None:
-        message = EmailMessage()
-        message["Subject"] = subject
-        message["From"] = config.email_from or config.email_smtp_user or "wechat-native@localhost"
-        message["To"] = config.email_to
-        message.set_content(text)
-        timeout = 15
-        if config.email_smtp_security == "ssl":
-            with smtplib.SMTP_SSL(
-                config.email_smtp_host, config.email_smtp_port, timeout=timeout
-            ) as server:
-                if config.email_smtp_user:
-                    server.login(config.email_smtp_user, config.email_smtp_password)
-                server.send_message(message)
-            return
-        with smtplib.SMTP(
-            config.email_smtp_host, config.email_smtp_port, timeout=timeout
-        ) as server:
-            if config.email_smtp_security == "starttls":
-                server.starttls(context=ssl.create_default_context())
-            if config.email_smtp_user:
-                server.login(config.email_smtp_user, config.email_smtp_password)
-            server.send_message(message)
-
     async def _send_umo(self, adapter, text: str) -> bool:
-        umo = self._resolve_umo(adapter)
+        umo = await self._resolve_umo(adapter)
         if not umo:
             self.logger.warning(
                 "掉线提醒未发送：未找到 weixin_oc 会话，请先给官方 AI 机器人发一条消息"
@@ -298,14 +276,21 @@ class OfflineNotifyManager:
         self.logger.info("掉线提醒已发送到 %s", umo.split(":", 1)[0])
         return True
 
-    def _resolve_umo(self, adapter) -> str | None:
-        explicit = adapter.native_config.offline_notify_umo
+    async def _resolve_umo(self, adapter) -> str | None:
+        explicit = adapter.native_config.offline_notify.umo
         if explicit:
             return explicit
         learned = self._state.get("umo")
-        if isinstance(learned, str) and learned:
+        active_ids = {
+            platform.meta().id for platform in active_platforms(self.context, "weixin_oc")
+        }
+        if is_weixin_private_umo(learned, active_ids):
             return learned
-        best = self._best_wxoc_umo()
+        try:
+            best = await best_weixin_umo(self.context)
+        except Exception as error:
+            self.logger.warning("提醒会话发现失败：%s", type(error).__name__)
+            return None
         if best:
             self._state["umo"] = best
             self._save_state()
@@ -315,49 +300,27 @@ class OfflineNotifyManager:
         if self._state.pop("umo", None) is not None:
             self._save_state()
 
-    def _best_wxoc_umo(self) -> str | None:
-        manager = getattr(self.context, "platform_manager", None)
-        instances = getattr(manager, "platform_insts", None) or []
-        candidates: list[tuple[float, str]] = []
-        for instance in instances:
-            try:
-                meta = instance.meta()
-            except Exception:
-                continue
-            if meta.name != NOTIFY_TYPE:
-                continue
-            tokens = getattr(instance, "_context_tokens", None)
-            if not isinstance(tokens, dict) or not tokens:
-                continue
-            recent = getattr(instance, "_recent_messages", None)
-            if not isinstance(recent, dict):
-                recent = {}
-            for user_id in tokens:
-                entry = recent.get(user_id)
-                score = float(getattr(entry, "updated_at", 0.0) or 0.0) if entry else 0.0
-                candidates.append((score, f"{meta.id}:FriendMessage:{user_id}"))
-        if not candidates:
-            return None
-        candidates.sort(key=lambda item: item[0], reverse=True)
-        if len(candidates) > 1 and candidates[0][0] == candidates[1][0]:
-            # Without a clear "most recent" session, guessing could notify the
-            # wrong person; wait until the owner messages the bot again.
-            return None
-        return candidates[0][1]
-
     def _runtime_from_state(self, platform_id: str) -> _Runtime:
         raw = (self._state.get("platforms") or {}).get(platform_id) or {}
         online = raw.get("online")
         down_since = raw.get("down_since")
         last_alert = raw.get("last_alert_ts")
+        login_qr = LoginQRSession()
+        if isinstance(raw.get("login_operation_id"), str):
+            login_qr.operation_id = raw["login_operation_id"]
+        if isinstance(raw.get("login_request_key"), str) and raw["login_request_key"]:
+            login_qr.request_key = raw["login_request_key"]
         return _Runtime(
             online=online if isinstance(online, bool) else None,
             down_since=float(down_since) if isinstance(down_since, (int, float)) else None,
             last_alert_ts=float(last_alert) if isinstance(last_alert, (int, float)) else 0.0,
+            qr_sent=raw.get("qr_sent") is True,
+            login_qr=login_qr,
         )
 
     def _load_state(self) -> dict:
         try:
+            self.state_path.chmod(0o600)
             raw = json.loads(self.state_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
@@ -367,16 +330,26 @@ class OfflineNotifyManager:
         platforms = {
             platform_id: {
                 "online": runtime.online,
-                "down_since": runtime.down_since if runtime.online is False else None,
+                "down_since": runtime.down_since,
                 "last_alert_ts": runtime.last_alert_ts,
+                "qr_sent": runtime.qr_sent,
+                "login_operation_id": runtime.login_qr.operation_id,
+                "login_request_key": runtime.login_qr.request_key,
             }
             for platform_id, runtime in self._runtime.items()
         }
         state = {"version": 1, "umo": self._state.get("umo", ""), "platforms": platforms}
+        temporary = None
         try:
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.state_path.with_suffix(".tmp")
-            temporary.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+            descriptor, name = tempfile.mkstemp(dir=self.state_path.parent, suffix=".tmp")
+            temporary = Path(name)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                temporary.chmod(0o600)
+                json.dump(state, stream, ensure_ascii=False)
             temporary.replace(self.state_path)
-        except OSError:
-            self.logger.warning("掉线提醒状态写入失败", exc_info=True)
+        except OSError as error:
+            self.logger.warning("掉线提醒状态写入失败：%s", type(error).__name__)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)

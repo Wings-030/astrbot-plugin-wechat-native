@@ -2,6 +2,60 @@ import pytest
 from conftest import module
 
 
+def test_notification_settings_are_grouped_and_legacy_configuration_is_supported():
+    from dataclasses import fields, replace
+
+    config = module("config")
+    settings = config.NativeConfig.from_dict(
+        {
+            "server_url": "http://localhost:6174",
+            "account_id": "account-1",
+            "enable_offline_notify": True,
+            "offline_notify_umo": "wxoc:FriendMessage:owner",
+            "offline_notify_after_seconds": 90,
+            "offline_notify_repeat_hours": 2,
+            "offline_notify_on_recovery": False,
+            "enable_login_qr": True,
+            "enable_email_notify": True,
+            "email_smtp_host": "smtp.example.com",
+            "email_smtp_port": 587,
+            "email_smtp_security": "starttls",
+            "email_smtp_user": "bot@example.com",
+            "email_smtp_password": "inline-secret",
+            "email_from": "sender@example.com",
+            "email_to": "owner@example.com",
+        }
+    )
+    assert settings.offline_notify == config.OfflineNotifyConfig(
+        enabled=True,
+        umo="wxoc:FriendMessage:owner",
+        after_seconds=90,
+        repeat_hours=2,
+        on_recovery=False,
+        login_qr=True,
+    )
+    assert settings.email == config.EmailNotifyConfig(
+        enabled=True,
+        smtp_host="smtp.example.com",
+        smtp_port=587,
+        smtp_security="starttls",
+        smtp_user="bot@example.com",
+        smtp_password="inline-secret",
+        sender="sender@example.com",
+        recipients="owner@example.com",
+    )
+    assert settings.email.load_password() == "inline-secret"
+    assert "inline-secret" not in repr(settings)
+    assert {item.name for item in fields(settings)}.isdisjoint(
+        {
+            "email_smtp_host",
+            "email_smtp_password",
+            "offline_notify_repeat_hours",
+        }
+    )
+    assert replace(settings, token="other").email is settings.email
+
+
 def test_config_token_file_and_url(tmp_path):
     config_module = module("config")
     Config = config_module.NativeConfig

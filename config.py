@@ -60,6 +60,7 @@ DEFAULT_CONFIG = {
     "email_smtp_security": "ssl",
     "email_smtp_user": "",
     "email_smtp_password": "",
+    "email_smtp_password_file": "",
     "email_from": "",
     "email_to": "",
 }
@@ -263,7 +264,12 @@ CONFIG_METADATA = {
         "type": "string",
         "description": "SMTP 授权码",
         "secret": True,
-        "hint": "不是邮箱登录密码；QQ/163 需要在网页版开启 SMTP 服务后生成授权码",
+        "hint": "建议使用 email_smtp_password_file；此处填写会存入 AstrBot 配置",
+    },
+    "email_smtp_password_file": {
+        "type": "string",
+        "description": "SMTP 授权码文件路径",
+        "hint": "优先从文件读取授权码，例如 /run/secrets/wechat-smtp-password",
     },
     "email_from": {
         "type": "string",
@@ -275,6 +281,100 @@ CONFIG_METADATA = {
         "hint": "可以填自己的邮箱；多人用英文逗号分隔",
     },
 }
+
+
+@dataclass(frozen=True)
+class OfflineNotifyConfig:
+    enabled: bool = False
+    umo: str = ""
+    after_seconds: int = 60
+    repeat_hours: int = 6
+    on_recovery: bool = True
+    login_qr: bool = False
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "OfflineNotifyConfig":
+        for key in ("enable_offline_notify", "offline_notify_on_recovery", "enable_login_qr"):
+            if key in data and not isinstance(data[key], bool):
+                raise ValueError(f"{key} 必须是布尔值")
+        after = data.get("offline_notify_after_seconds", 60)
+        if type(after) is not int or not 10 <= after <= 3600:
+            raise ValueError("offline_notify_after_seconds 必须是 10–3600 的整数")
+        repeat = data.get("offline_notify_repeat_hours", 6)
+        if type(repeat) is not int or not 0 <= repeat <= 168:
+            raise ValueError("offline_notify_repeat_hours 必须是 0–168 的整数")
+        umo = data.get("offline_notify_umo", "")
+        if not isinstance(umo, str):
+            raise ValueError("offline_notify_umo 必须是字符串")
+        return cls(
+            enabled=data.get("enable_offline_notify", False),
+            umo=umo.strip(),
+            after_seconds=after,
+            repeat_hours=repeat,
+            on_recovery=data.get("offline_notify_on_recovery", True),
+            login_qr=data.get("enable_login_qr", False),
+        )
+
+
+@dataclass(frozen=True)
+class EmailNotifyConfig:
+    enabled: bool = False
+    smtp_host: str = ""
+    smtp_port: int = 465
+    smtp_security: str = "ssl"
+    smtp_user: str = ""
+    smtp_password: str = field(default="", repr=False)
+    smtp_password_file: str = field(default="", repr=False)
+    sender: str = ""
+    recipients: str = ""
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "EmailNotifyConfig":
+        if "enable_email_notify" in data and not isinstance(data["enable_email_notify"], bool):
+            raise ValueError("enable_email_notify 必须是布尔值")
+        port = data.get("email_smtp_port", 465)
+        if type(port) is not int or not 1 <= port <= 65535:
+            raise ValueError("email_smtp_port 必须是 1–65535 的整数")
+        security = data.get("email_smtp_security", "ssl")
+        if not isinstance(security, str) or security not in {"ssl", "starttls", "none"}:
+            raise ValueError("email_smtp_security 必须为 ssl/starttls/none")
+        for key in (
+            "email_smtp_host",
+            "email_smtp_user",
+            "email_smtp_password",
+            "email_smtp_password_file",
+            "email_from",
+            "email_to",
+        ):
+            if not isinstance(data.get(key, ""), str):
+                raise ValueError(f"{key} 必须是字符串")
+        return cls(
+            enabled=data.get("enable_email_notify", False),
+            smtp_host=data.get("email_smtp_host", "").strip(),
+            smtp_port=port,
+            smtp_security=security,
+            smtp_user=data.get("email_smtp_user", "").strip(),
+            smtp_password=data.get("email_smtp_password", ""),
+            smtp_password_file=data.get("email_smtp_password_file", "").strip(),
+            sender=data.get("email_from", "").strip(),
+            recipients=data.get("email_to", "").strip(),
+        )
+
+    def load_password(self) -> str:
+        if not self.smtp_password_file:
+            return self.smtp_password
+        try:
+            with Path(self.smtp_password_file).open(encoding="utf-8") as stream:
+                password = stream.read(8193).rstrip("\r\n")
+        except (OSError, UnicodeError, ValueError):
+            raise ValueError("email_smtp_password_file 不可读，请检查容器挂载与权限") from None
+        if (
+            not password
+            or len(password) > 8192
+            or any(ord(c) < 32 or ord(c) == 127 for c in password)
+        ):
+            raise ValueError("email_smtp_password_file 必须包含有效授权码")
+        return password
 
 
 @dataclass(frozen=True)
@@ -298,20 +398,8 @@ class NativeConfig:
     admin_token_file: str = field(default="", repr=False)
     summary_max_messages: int = 200
     summary_window_minutes: int = 60
-    enable_offline_notify: bool = False
-    offline_notify_umo: str = ""
-    offline_notify_after_seconds: int = 60
-    offline_notify_repeat_hours: int = 6
-    offline_notify_on_recovery: bool = True
-    enable_login_qr: bool = False
-    enable_email_notify: bool = False
-    email_smtp_host: str = ""
-    email_smtp_port: int = 465
-    email_smtp_security: str = "ssl"
-    email_smtp_user: str = ""
-    email_smtp_password: str = field(default="", repr=False)
-    email_from: str = ""
-    email_to: str = ""
+    offline_notify: OfflineNotifyConfig = field(default_factory=OfflineNotifyConfig)
+    email: EmailNotifyConfig = field(default_factory=EmailNotifyConfig)
 
     @classmethod
     def from_dict(cls, data: dict) -> "NativeConfig":
@@ -347,10 +435,6 @@ class NativeConfig:
             "enable_group_summary",
             "enable_history_tools",
             "enable_wechat_actions",
-            "enable_offline_notify",
-            "offline_notify_on_recovery",
-            "enable_email_notify",
-            "enable_login_qr",
         ):
             if key in data and not isinstance(data[key], bool):
                 raise ValueError(f"{key} 必须是布尔值")
@@ -361,30 +445,6 @@ class NativeConfig:
             value = data.get(key, default)
             if type(value) is not int or not 1 <= value <= maximum:
                 raise ValueError(f"{key} 必须是 1–{maximum} 的整数")
-        after_seconds = data.get("offline_notify_after_seconds", 60)
-        if type(after_seconds) is not int or not 10 <= after_seconds <= 3600:
-            raise ValueError("offline_notify_after_seconds 必须是 10–3600 的整数")
-        repeat_hours = data.get("offline_notify_repeat_hours", 6)
-        if type(repeat_hours) is not int or not 0 <= repeat_hours <= 168:
-            raise ValueError("offline_notify_repeat_hours 必须是 0–168 的整数")
-        notify_umo = data.get("offline_notify_umo", "")
-        if not isinstance(notify_umo, str):
-            raise ValueError("offline_notify_umo 必须是字符串")
-        email_port = data.get("email_smtp_port", 465)
-        if type(email_port) is not int or not 1 <= email_port <= 65535:
-            raise ValueError("email_smtp_port 必须是 1–65535 的整数")
-        email_security = data.get("email_smtp_security", "ssl")
-        if email_security not in {"ssl", "starttls", "none"}:
-            raise ValueError("email_smtp_security 必须为 ssl/starttls/none")
-        for key in (
-            "email_smtp_host",
-            "email_smtp_user",
-            "email_smtp_password",
-            "email_from",
-            "email_to",
-        ):
-            if not isinstance(data.get(key, ""), str):
-                raise ValueError(f"{key} 必须是字符串")
         lists = {}
         for key in ("allowed_users", "allowed_groups", "wechat_action_admins"):
             value = data.get(key, [])
@@ -410,20 +470,8 @@ class NativeConfig:
             admin_token_file=data.get("admin_token_file", ""),
             summary_max_messages=data.get("summary_max_messages", 200),
             summary_window_minutes=data.get("summary_window_minutes", 60),
-            enable_offline_notify=data.get("enable_offline_notify", False),
-            offline_notify_umo=notify_umo.strip(),
-            offline_notify_after_seconds=after_seconds,
-            offline_notify_repeat_hours=repeat_hours,
-            offline_notify_on_recovery=data.get("offline_notify_on_recovery", True),
-            enable_login_qr=data.get("enable_login_qr", False),
-            enable_email_notify=data.get("enable_email_notify", False),
-            email_smtp_host=data.get("email_smtp_host", "").strip(),
-            email_smtp_port=email_port,
-            email_smtp_security=email_security,
-            email_smtp_user=data.get("email_smtp_user", "").strip(),
-            email_smtp_password=data.get("email_smtp_password", ""),
-            email_from=data.get("email_from", "").strip(),
-            email_to=data.get("email_to", "").strip(),
+            offline_notify=OfflineNotifyConfig.from_dict(data),
+            email=EmailNotifyConfig.from_dict(data),
             **lists,
         )
 

@@ -21,9 +21,10 @@ from .group_ranking import (
     parse_analysis,
 )
 from .history_tools import run_read
-from .login_qr import create_login_qr
+from .login_qr import login_qr_file
 from .mention_tools import run_mention
 from .notify import OfflineNotifyManager
+from .notify_targets import account_is_online, active_platforms
 from .summary import SUMMARY_SYSTEM_PROMPT, summary_prompt
 from .tool_support import ToolError, is_native_event
 from .tool_support import context as tool_context
@@ -161,10 +162,15 @@ class WeChatNativePlugin(Star):
             await self._offline_notify.stop()
             self._offline_notify = None
 
+    @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE, priority=100)
+    async def remember_notification_session(self, event: AstrMessageEvent):
+        if self._offline_notify is not None:
+            self._offline_notify.observe_session(event)
+
     @filter.command("微信二维码")
     async def send_wechat_login_qr(self, event: AstrMessageEvent):
         """个人微信掉线后，在当前聊天生成并发送登录二维码。"""
-        if event.get_platform_name() != "weixin_oc":
+        if event.get_platform_name() != "weixin_oc" or not event.is_private_chat():
             return
         adapter = self._native_adapter()
         if adapter is None:
@@ -174,11 +180,9 @@ class WeChatNativePlugin(Star):
             account = await adapter.client.account()
         except Exception:
             account = {}
-        online = bool(
-            account.get("authenticated") and account.get("connection") == "online"
-        )
+        online = account_is_online(account)
         try:
-            path = await create_login_qr(adapter.client, StarTools.get_data_dir(PLUGIN_ID))
+            data = await self._offline_notify.get_login_qr(adapter)
         except Exception as error:
             self.logger.warning("登录二维码生成失败：%s", type(error).__name__)
             yield event.plain_result("二维码生成失败，请检查 WeChat Native 服务。")
@@ -188,16 +192,11 @@ class WeChatNativePlugin(Star):
             if online
             else "请用手机微信扫码登录（约 4 分钟内有效）："
         )
-        yield event.chain_result([Plain(hint), Image.fromFileSystem(str(path))])
+        with login_qr_file(data, StarTools.get_data_dir(PLUGIN_ID)) as path:
+            await event.send(MessageChain([Plain(hint), Image.fromFileSystem(str(path))]))
 
     def _native_adapter(self):
-        for instance in self.context.platform_manager.platform_insts:
-            try:
-                if instance.meta().name == "wechat_native":
-                    return instance
-            except Exception:
-                continue
-        return None
+        return next(iter(active_platforms(self.context, "wechat_native")), None)
 
     @filter.on_llm_request()
     async def attach_pdf_text(self, event: AstrMessageEvent, req: ProviderRequest):

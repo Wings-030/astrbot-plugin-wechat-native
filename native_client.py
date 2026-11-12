@@ -774,12 +774,14 @@ class NativeClient:
                 method, self.api_url + path, allow_redirects=False, **kwargs
             ) as response:
                 await self._raise_for_status(response)
-                data = await response.read()
+                data = bytearray()
+                async for chunk in response.content.iter_chunked(16384):
+                    if len(data) + len(chunk) > limit:
+                        raise NativeAPIError(0, "media_metadata_limit")
+                    data.extend(chunk)
         except (aiohttp.ClientError, TimeoutError, OSError):
             raise NativeAPIError(0, "timeout") from None
-        if len(data) > limit:
-            raise NativeAPIError(0, "media_metadata_limit")
-        return data
+        return bytes(data)
 
     async def accounts(self):
         return await self._request("GET", "/accounts")
@@ -790,7 +792,9 @@ class NativeClient:
     async def account(self):
         return await self._request("GET", self.prefix)
 
-    async def start_login(self, *, timeout_seconds: int = 300) -> dict:
+    async def start_login(
+        self, *, timeout_seconds: int = 300, idempotency_key: str | None = None
+    ) -> dict:
         return await self._request(
             "POST",
             self.prefix + "/auth/login",
@@ -801,7 +805,7 @@ class NativeClient:
                 "timeoutSeconds": timeout_seconds,
                 "computerName": "astrbot",
             },
-            headers={"Idempotency-Key": uuid4().hex},
+            headers={"Idempotency-Key": idempotency_key or uuid4().hex},
         )
 
     async def operation_qr(self, operation_id: str, generation: int) -> bytes:

@@ -1,7 +1,9 @@
 import asyncio
 import hashlib
 import json
+from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from aiohttp import web
@@ -24,6 +26,34 @@ VALID_WEBP = b"RIFF\x10\x00\x00\x00WEBPVP8 \x04\x00\x00\x00\x00\x00\x00\x00"
 
 def client(url, **kwargs):
     return module("native_client").NativeClient(url + "/v1", "account/a", "fake-token", **kwargs)
+
+
+@pytest.mark.parametrize("limit", [3, 4])
+async def test_binary_response_is_limited_while_streaming(limit):
+    api = module("native_client")
+    chunks_read = []
+
+    async def chunks(size):
+        assert size <= 65536
+        for chunk in (b"ab", b"cd"):
+            chunks_read.append(chunk)
+            yield chunk
+        if limit == 3:
+            pytest.fail("oversized response must be closed before reading more chunks")
+
+    @asynccontextmanager
+    async def request(*args, **kwargs):
+        assert kwargs["allow_redirects"] is False
+        yield SimpleNamespace(status=200, content=SimpleNamespace(iter_chunked=chunks))
+
+    c = client("http://localhost")
+    c._session = SimpleNamespace(closed=False, request=request)
+    if limit == 3:
+        with pytest.raises(api.NativeAPIError, match="media_metadata_limit"):
+            await c._request_bytes("GET", "/qr", limit=limit)
+    else:
+        assert await c._request_bytes("GET", "/qr", limit=limit) == b"abcd"
+    assert chunks_read == [b"ab", b"cd"]
 
 
 def receipt(state="accepted", **kwargs):
