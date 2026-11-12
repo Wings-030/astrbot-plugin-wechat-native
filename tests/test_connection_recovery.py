@@ -6,6 +6,7 @@ import io
 
 import pytest
 from aiohttp import web
+from astrbot.api import logger  # noqa: F401
 from conftest import module
 from PIL import Image
 
@@ -443,7 +444,8 @@ async def test_login_conflict_reuses_original_key_without_cancelling_unknown_tas
     assert "DELETE" not in methods
 
 
-async def test_failed_login_logs_native_code_without_sensitive_result(serve, tmp_path, caplog):
+async def test_failed_login_returns_safe_result_without_diagnostics(serve, tmp_path, caplog):
+    caplog.set_level("INFO")
     bot, state = await login_server(serve, tmp_path)
     state["operation"] = operation(
         "failed",
@@ -456,80 +458,86 @@ async def test_failed_login_logs_native_code_without_sensitive_result(serve, tmp
     manager = module("login_session").LoginSessionManager(state["kv"])
     result = await manager.start(bot)
     assert result == {"state": "failed", "qr_available": False}
-    assert "stage=start state=failed code=profile_network_routing_unavailable" in caplog.text
+    assert "Native 登录诊断" not in caplog.text
     assert "SENSITIVE" not in caplog.text and "PRIVATE QR" not in caplog.text
     assert "synthetic-admin-token" not in caplog.text
     assert state["gets"] == 0
 
 
 @pytest.mark.parametrize("code", ["SENSITIVE TOKEN", {"private": "SENSITIVE"}, ["SENSITIVE"], None])
-async def test_login_diagnostics_redact_unknown_native_codes(serve, tmp_path, caplog, code):
+async def test_unknown_native_failure_is_safe_without_diagnostics(serve, tmp_path, caplog, code):
+    caplog.set_level("INFO")
     bot, state = await login_server(serve, tmp_path)
     state["operation"] = operation("failed", result={"code": code, "message": "PRIVATE BODY"})
-    await module("login_session").LoginSessionManager(state["kv"]).start(bot)
-    assert "stage=start state=failed code=unknown" in caplog.text
+    result = await module("login_session").LoginSessionManager(state["kv"]).start(bot)
+    assert result == {"state": "failed", "qr_available": False}
+    assert "Native 登录诊断" not in caplog.text
     assert "SENSITIVE" not in caplog.text and "PRIVATE BODY" not in caplog.text
 
 
-async def test_login_status_logs_failure_transition_once_without_poll_noise(
+async def test_terminal_login_status_reuses_cached_result_without_diagnostics(
     serve, tmp_path, caplog
 ):
+    caplog.set_level("INFO")
     bot, state = await login_server(serve, tmp_path)
     manager = module("login_session").LoginSessionManager(state["kv"])
     await manager.start(bot)
     caplog.clear()
     state["operation"] = operation("failed", result={"code": "login_failed"})
     assert (await manager.status(bot))["state"] == "failed"
-    assert "stage=status state=failed code=login_failed" in caplog.text
     assert (await manager.status(bot))["state"] == "failed"
-    assert caplog.text.count("stage=status state=failed") == 1
+    assert "Native 登录诊断" not in caplog.text
     assert state["gets"] == 1
 
 
 @pytest.mark.parametrize(
-    "stage,status,code",
+    "stage,status,code,public_status",
     [
-        ("start", 403, "insufficient_scope"),
-        ("status", 503, "timeout"),
-        ("qr", 409, "login_challenge_superseded"),
+        ("start", 403, "insufficient_scope", 403),
+        ("status", 503, "timeout", 502),
+        ("qr", 409, "login_challenge_superseded", 409),
     ],
 )
-async def test_login_http_diagnostics_identify_failed_stage(
+async def test_login_http_errors_are_safe_without_diagnostics(
     serve,
     tmp_path,
     caplog,
     stage,
     status,
     code,
+    public_status,
 ):
+    caplog.set_level("INFO")
     bot, state = await login_server(serve, tmp_path)
     login = module("login_session")
     manager = login.LoginSessionManager(state["kv"])
     if stage != "start":
         await manager.start(bot)
     state["http_errors"] = {stage: (status, code)}
-    with pytest.raises(login.LoginError):
+    with pytest.raises(login.LoginError) as error:
         if stage == "qr":
             await manager.qr(bot, 1)
         elif stage == "status":
             await manager.status(bot)
         else:
             await manager.start(bot)
-    assert f"stage={stage} http={status} code={code}" in caplog.text
+    assert error.value.status == public_status
+    assert "Native 登录诊断" not in caplog.text
     assert "SENSITIVE SERVER BODY" not in caplog.text
     assert "synthetic-admin-token" not in caplog.text
 
 
 @pytest.mark.parametrize(
-    "body,mime,reason",
+    "body,mime",
     [
-        (b"not png", "text/html", "invalid_content_type"),
-        (b"not png", "image/png", "invalid_signature"),
-        (b"x" * (1024 * 1024 + 1), "image/png", "size_limit"),
-        (b"\x89PNG\r\n\x1a\nSENSITIVE", "image/png", "invalid_png"),
+        (b"not png", "text/html"),
+        (b"not png", "image/png"),
+        (b"x" * (1024 * 1024 + 1), "image/png"),
+        (b"\x89PNG\r\n\x1a\nSENSITIVE", "image/png"),
     ],
 )
-async def test_qr_validation_diagnostics_do_not_log_image_bytes(serve, caplog, body, mime, reason):
+async def test_invalid_qr_rejected_without_image_or_diagnostic_logs(serve, caplog, body, mime):
+    caplog.set_level("INFO")
     async def handler(req):
         return web.Response(body=body, content_type=mime)
 
@@ -537,11 +545,12 @@ async def test_qr_validation_diagnostics_do_not_log_image_bytes(serve, caplog, b
     async with native.NativeClient(await serve(handler) + "/v1", "a", "admin") as client:
         with pytest.raises(native.NativeAPIError):
             await client.login_qr("op-1", 1)
-    assert f"stage=qr reason={reason}" in caplog.text
+    assert "Native 登录诊断" not in caplog.text
     assert "SENSITIVE" not in caplog.text and "not png" not in caplog.text
 
 
-async def test_explicit_qr_retry_bypasses_failed_saved_login(serve, tmp_path):
+async def test_explicit_qr_retry_bypasses_failed_saved_login(serve, tmp_path, caplog):
+    caplog.set_level("INFO")
     bot, state = await login_server(serve, tmp_path)
     login = module("login_session")
     manager = login.LoginSessionManager(state["kv"])
@@ -567,6 +576,7 @@ async def test_explicit_qr_retry_bypasses_failed_saved_login(serve, tmp_path):
     }
     assert len(set(state["posts"])) == 2
     assert (await manager.qr(bot, 1))["image"].startswith("data:image/png;base64,")
+    assert "Native 登录诊断" not in caplog.text
 
 
 async def test_uncertain_qr_post_keeps_strategy_and_key_after_restart(serve, tmp_path):

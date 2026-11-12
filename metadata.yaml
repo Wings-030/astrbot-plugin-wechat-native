@@ -11,7 +11,7 @@ desc: |
   群红包自动暖场默认关闭。开启后，收到真实微信红包时可在允许回复的群里自动轮换暖场文案。
 
   需要运行并登录 agent-wechat-native，配置 API 地址、账号 ID 和 Token；图片识别需要支持视觉的模型。文件收发暂不支持。详细配置与使用方法请参阅项目 README。
-version: 0.3.12
+version: 0.3.13
 author: neozhu
 category: utilities
 repo: https://github.com/neozhu/astrbot-plugin-wechat-native

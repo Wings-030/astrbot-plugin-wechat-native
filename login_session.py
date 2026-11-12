@@ -31,26 +31,6 @@ ACTIVE_STATES = {
     "awaiting_scan",
     "awaiting_approval",
 }
-SAFE_LOGIN_FAILURE_CODES = {
-    "login_failed",
-    "auth_required",
-    "login_poll_failed",
-    "login_lan_challenge_failed",
-    "account_identity_mismatch",
-    "account_database_password_mismatch",
-    "account_device_mismatch",
-    "profile_identity_unavailable",
-    "profile_database_password_required",
-    "profile_saved_key_info_unavailable",
-    "profile_network_routing_unavailable",
-    "profile_keys_unavailable",
-    "profile_database_unavailable",
-    "profile_changed_during_login",
-    "profile_resource_limit",
-    "profile_cipher_unavailable",
-    "profile_io_failed",
-    "profile_unavailable",
-}
 
 
 class LoginError(Exception):
@@ -71,7 +51,6 @@ class LoginSessionManager:
         try:
             config = NativeConfig.from_dict(bot)
         except (TypeError, ValueError):
-            logger.warning("Native 登录诊断：stage=config reason=invalid_config")
             raise LoginError("连接配置无效，请检查机器人配置", 400) from None
         identity = identity_hash(config)
         return config, f"connection_login:{bot['id']}:{identity}", identity
@@ -107,39 +86,15 @@ class LoginSessionManager:
                 replace(config, token="", token_file=config.admin_token_file).load_token
             )
         except (TypeError, ValueError):
-            logger.warning("Native 登录诊断：stage=admin_token reason=unreadable_or_invalid")
             raise LoginError("Admin Token 文件不可读或无效，请检查挂载与权限", 403) from None
         return NativeClient(config.api_url, config.account_id, token, request_timeout=5)
 
     @staticmethod
     def _public(value):
-        if value["state"] == "failed":
-            logger.warning(
-                "Native 登录诊断：stage=restore state=failed code=not_recorded cached=true；"
-                "点击重新获取二维码可采集新任务的失败原因"
-            )
         return {"state": value["state"], "qr_available": False}
-
-    @staticmethod
-    def _log_operation(value, stage, previous_state=None):
-        state, result = value["state"], value["result"]
-        if state == "failed":
-            code = result.get("code")
-            if not isinstance(code, str) or code not in SAFE_LOGIN_FAILURE_CODES:
-                code = "unknown"
-            logger.warning("Native 登录诊断：stage=%s state=failed code=%s", stage, code)
-        elif state != previous_state:
-            logger.info(
-                "Native 登录诊断：stage=%s state=%s qr_available=%s qr_generation=%s",
-                stage,
-                state,
-                result.get("qrAvailable", False),
-                result.get("qrGeneration"),
-            )
 
     async def _fetch(self, client, key, record):
         value = await client.login_status(record["operation_id"])
-        self._log_operation(value, "status", record["state"])
         record = {**record, "state": value["state"]}
         await self.kv.put_kv_data(key, record)
         result = value["result"]
@@ -150,8 +105,7 @@ class LoginSessionManager:
         return record, public
 
     @staticmethod
-    def _native_error(error, stage):
-        logger.warning("Native 登录诊断：stage=%s http=%s code=%s", stage, error.status, error.code)
+    def _native_error(error):
         if error.status in (401, 403):
             return LoginError("Admin Token 无权登录该账号，请检查授权", 403)
         if error.status == 409:
@@ -160,27 +114,17 @@ class LoginSessionManager:
 
     async def start(self, bot, *, retry=False):
         async with self._lock(bot):
-            stage = "session_load"
             try:
                 config, key, identity = self._config_key(bot)
                 record = await self._read(key, identity)
-                stage = "probe"
                 health = await probe_connection(bot)
                 if health.auth_state != "unauthenticated" or health.health != "offline":
-                    logger.warning(
-                        "Native 登录诊断：stage=probe health=%s auth_state=%s reason=%s",
-                        health.health,
-                        health.auth_state,
-                        health.reason,
-                    )
                     raise LoginError("当前账号无需扫码，或 Native 服务不可用", 409)
-                stage = "admin_token"
                 async with await self._client(config) as client:
                     if record and record["operation_id"]:
                         if record["state"] in TERMINAL_STATES:
                             public = self._public(record)
                         else:
-                            stage = "status"
                             record, public = await self._fetch(client, key, record)
                         if record["state"] not in TERMINAL_STATES or not retry:
                             return public
@@ -195,19 +139,10 @@ class LoginSessionManager:
                             "force_qr": retry,
                         }
                     # Persist even on retries: a failed earlier write must never reach Native.
-                    stage = "session_save"
                     await self.kv.put_kv_data(key, record)
-                    stage = "start"
                     force_qr = record.get("force_qr", False)
-                    logger.info(
-                        "Native 登录诊断：stage=start event=request retry=%s force_qr=%s",
-                        retry,
-                        force_qr,
-                    )
                     value = await client.start_login(record["idempotency_key"], force_qr=force_qr)
-                    self._log_operation(value, "start")
                     record = {**record, "operation_id": value["id"], "state": value["state"]}
-                    stage = "session_save"
                     await self.kv.put_kv_data(key, record)
                     result = value["result"]
                     available = (
@@ -220,13 +155,9 @@ class LoginSessionManager:
             except LoginError:
                 raise
             except NativeAPIError as error:
-                raise self._native_error(error, stage) from None
-            except Exception as error:
-                logger.warning(
-                    "Native 登录诊断：stage=%s reason=unexpected_error error_type=%s",
-                    stage,
-                    type(error).__name__,
-                )
+                raise self._native_error(error) from None
+            except Exception:
+                logger.warning("Native 登录持久化不可用，已停止本次操作")
                 raise LoginError("登录存储不可用，请稍后重试", 503) from None
 
     async def status(self, bot):
@@ -244,43 +175,27 @@ class LoginSessionManager:
             except LoginError:
                 raise
             except NativeAPIError as error:
-                raise self._native_error(error, "status") from None
-            except Exception as error:
-                logger.warning(
-                    "Native 登录诊断：stage=status reason=unexpected_error error_type=%s",
-                    type(error).__name__,
-                )
+                raise self._native_error(error) from None
+            except Exception:
+                logger.warning("Native 登录状态读取失败")
                 raise LoginError("登录存储不可用，请稍后重试", 503) from None
 
     async def qr(self, bot, generation):
         async with self._lock(bot):
-            stage = "session_load"
             try:
                 config, key, identity = self._config_key(bot)
                 record = await self._read(key, identity)
                 if not record or not record["operation_id"]:
                     raise LoginError("请先准备登录任务")
                 async with await self._client(config) as client:
-                    stage = "status"
                     _, public = await self._fetch(client, key, record)
                     if (
                         not public["qr_available"]
                         or type(generation) is not int
                         or generation != public.get("qr_generation")
                     ):
-                        logger.warning(
-                            "Native 登录诊断：stage=qr reason=stale_or_unavailable generation=%s",
-                            generation if type(generation) is int else "invalid",
-                        )
                         raise LoginError("二维码已更新或失效，请刷新登录状态")
-                    stage = "qr"
-                    logger.info("Native 登录诊断：stage=qr event=request generation=%s", generation)
                     image = await client.login_qr(record["operation_id"], generation)
-                    logger.info(
-                        "Native 登录诊断：stage=qr event=received generation=%s bytes=%s",
-                        generation,
-                        len(image),
-                    )
                 return {
                     "image": "data:image/png;base64," + base64.b64encode(image).decode("ascii"),
                     "generation": generation,
@@ -288,11 +203,7 @@ class LoginSessionManager:
             except LoginError:
                 raise
             except NativeAPIError as error:
-                raise self._native_error(error, stage) from None
-            except Exception as error:
-                logger.warning(
-                    "Native 登录诊断：stage=%s reason=unexpected_error error_type=%s",
-                    stage,
-                    type(error).__name__,
-                )
+                raise self._native_error(error) from None
+            except Exception:
+                logger.warning("Native 二维码读取失败")
                 raise LoginError("二维码读取失败，请稍后重试", 503) from None

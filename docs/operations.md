@@ -32,22 +32,6 @@ Plugin KV 保存绑定、登录幂等 Key/Operation 标识和事故状态。不�
 
 ### 排错
 
-扫码故障排查时，在 AstrBot“数据与日志”中筛选 **`Native 登录诊断`**。
-更新插件并重载后，点击一次“重新获取二维码”，收集该次操作的日志：
-
-| 日志字段 | 含义 |
-| --- | --- |
-| `stage=start event=request` | 已提交登录请求；随后会记录 Native 返回的初始状态 |
-| `stage=status state=failed code=...` | Native 登录任务失败；`code` 为白名单内的服务错误码 |
-| `stage=start/status/qr http=... code=...` | 对应 HTTP 请求失败；区分创建任务、查询状态和获取图片 |
-| `stage=qr reason=invalid_content_type/invalid_signature/invalid_png/size_limit` | 图片响应类型、签名、完整性或大小校验失败 |
-| `stage=restore state=failed code=not_recorded cached=true` | 恢复了旧的失败记录；点击手动重试后可采集新任务错误 |
-| `stage=start event=request retry=True force_qr=True` | 手动重新扫码的新任务；不会先走旧会话 `resuming` 路径 |
-| `stage=admin_token reason=unreadable_or_invalid` | 既有 Admin Token 文件无法读取或内容无效 |
-
-日志仅记录阶段、状态、安全错误码、QR 代次和字节数，不记录 Token、二维码、请求 URL、
-账号标识或 Native 原始错误正文。未知错误码显示为 `unknown`；Native 只返回 `login_failed`
-时，还需结合 Native 服务自身日志定位。状态不变的轮询不会反复输出状态日志。
 手动重新扫码仍复用活跃或结果不确定的原任务；策略随幂等 Key 保存，超时或重启后保持一致。
 
 | 表现 | 检查项 |
