@@ -206,6 +206,13 @@ async def login_server(serve, tmp_path, *, authenticated=False, lost=False):
                 {"id": "a", "authenticated": state["authenticated"], "connection": "reconnecting"}
             )
         assert req.headers["Authorization"] == "Bearer synthetic-admin-token"
+        stage = "start" if req.method == "POST" else "qr" if req.path.endswith("/qr") else "status"
+        failure = state.get("http_errors", {}).get(stage)
+        if failure:
+            status, code = failure
+            return web.json_response(
+                {"error": {"code": code, "message": "SENSITIVE SERVER BODY"}}, status=status
+            )
         if req.method == "POST":
             key = req.headers["Idempotency-Key"]
             state["posts"].append(key)
@@ -427,3 +434,84 @@ async def test_login_conflict_reuses_original_key_without_cancelling_unknown_tas
         assert error.value.status == 409
     assert len(keys) == 2 and len(set(keys)) == 1
     assert "DELETE" not in methods
+
+
+async def test_failed_login_logs_native_code_without_sensitive_result(serve, tmp_path, caplog):
+    bot, state = await login_server(serve, tmp_path)
+    state["operation"] = operation(
+        "failed", result={"code": "profile_network_routing_unavailable",
+                          "message": "SENSITIVE PROFILE PATH AND TOKEN", "qr": "PRIVATE QR"},
+    )
+    manager = module("login_session").LoginSessionManager(state["kv"])
+    result = await manager.start(bot)
+    assert result == {"state": "failed", "qr_available": False}
+    assert "stage=start state=failed code=profile_network_routing_unavailable" in caplog.text
+    assert "SENSITIVE" not in caplog.text and "PRIVATE QR" not in caplog.text
+    assert "synthetic-admin-token" not in caplog.text
+    assert state["gets"] == 0
+
+
+@pytest.mark.parametrize("code", ["SENSITIVE TOKEN", {"private": "SENSITIVE"}, ["SENSITIVE"], None])
+async def test_login_diagnostics_redact_unknown_native_codes(serve, tmp_path, caplog, code):
+    bot, state = await login_server(serve, tmp_path)
+    state["operation"] = operation("failed", result={"code": code, "message": "PRIVATE BODY"})
+    await module("login_session").LoginSessionManager(state["kv"]).start(bot)
+    assert "stage=start state=failed code=unknown" in caplog.text
+    assert "SENSITIVE" not in caplog.text and "PRIVATE BODY" not in caplog.text
+
+
+async def test_login_status_logs_failure_transition_once_without_poll_noise(serve, tmp_path, caplog):
+    bot, state = await login_server(serve, tmp_path)
+    manager = module("login_session").LoginSessionManager(state["kv"])
+    await manager.start(bot)
+    caplog.clear()
+    state["operation"] = operation("failed", result={"code": "login_failed"})
+    assert (await manager.status(bot))["state"] == "failed"
+    assert "stage=status state=failed code=login_failed" in caplog.text
+    assert (await manager.status(bot))["state"] == "failed"
+    assert caplog.text.count("stage=status state=failed") == 1
+    assert state["gets"] == 1
+
+
+@pytest.mark.parametrize("stage,status,code", [
+    ("start", 403, "insufficient_scope"),
+    ("status", 503, "timeout"),
+    ("qr", 409, "login_challenge_superseded"),
+])
+async def test_login_http_diagnostics_identify_failed_stage(
+    serve, tmp_path, caplog, stage, status, code,
+):
+    bot, state = await login_server(serve, tmp_path)
+    login = module("login_session")
+    manager = login.LoginSessionManager(state["kv"])
+    if stage != "start":
+        await manager.start(bot)
+    state["http_errors"] = {stage: (status, code)}
+    with pytest.raises(login.LoginError):
+        if stage == "qr":
+            await manager.qr(bot, 1)
+        elif stage == "status":
+            await manager.status(bot)
+        else:
+            await manager.start(bot)
+    assert f"stage={stage} http={status} code={code}" in caplog.text
+    assert "SENSITIVE SERVER BODY" not in caplog.text
+    assert "synthetic-admin-token" not in caplog.text
+
+
+@pytest.mark.parametrize("body,mime,reason", [
+    (b"not png", "text/html", "invalid_content_type"),
+    (b"not png", "image/png", "invalid_signature"),
+    (b"x" * (1024 * 1024 + 1), "image/png", "size_limit"),
+    (b"\x89PNG\r\n\x1a\nSENSITIVE", "image/png", "invalid_png"),
+])
+async def test_qr_validation_diagnostics_do_not_log_image_bytes(serve, caplog, body, mime, reason):
+    async def handler(req):
+        return web.Response(body=body, content_type=mime)
+
+    native = module("native_client")
+    async with native.NativeClient(await serve(handler) + "/v1", "a", "admin") as client:
+        with pytest.raises(native.NativeAPIError):
+            await client.login_qr("op-1", 1)
+    assert f"stage=qr reason={reason}" in caplog.text
+    assert "SENSITIVE" not in caplog.text and "not png" not in caplog.text

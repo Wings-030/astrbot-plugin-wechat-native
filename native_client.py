@@ -797,11 +797,14 @@ class NativeClient:
             or not isinstance(result, dict)
             or type(result.get("qrAvailable", False)) is not bool
         ):
+            logger.warning("Native 登录诊断：stage=operation reason=invalid_payload")
             raise NativeAPIError(502)
         generation = result.get("qrGeneration")
         if generation is not None and (type(generation) is not int or generation < 0):
+            logger.warning("Native 登录诊断：stage=operation reason=invalid_qr_generation")
             raise NativeAPIError(502)
         if result.get("qrAvailable") and (generation is None or generation < 1):
+            logger.warning("Native 登录诊断：stage=operation reason=invalid_qr_generation")
             raise NativeAPIError(502)
         return value
 
@@ -833,13 +836,16 @@ class NativeClient:
             ) as response:
                 await self._raise_for_status(response)
                 if response.status != 200 or response.content_type != "image/png":
+                    logger.warning("Native 登录诊断：stage=qr reason=invalid_content_type")
                     raise NativeAPIError(502)
                 data = bytearray()
                 async for part in response.content.iter_chunked(16384):
                     data.extend(part)
                     if len(data) > 1024 * 1024:
+                        logger.warning("Native 登录诊断：stage=qr reason=size_limit")
                         raise NativeAPIError(502)
                 if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+                    logger.warning("Native 登录诊断：stage=qr reason=invalid_signature")
                     raise NativeAPIError(502)
                 from PIL import Image
 
@@ -849,6 +855,7 @@ class NativeClient:
                             raise ValueError
                         image.verify()
                 except (OSError, ValueError, SyntaxError, Image.DecompressionBombError):
+                    logger.warning("Native 登录诊断：stage=qr reason=invalid_png")
                     raise NativeAPIError(502) from None
                 return bytes(data)
         except (aiohttp.ClientError, TimeoutError, OSError):
